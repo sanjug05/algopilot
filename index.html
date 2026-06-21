@@ -5,6 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>AlgoPilot — Trading Operations Terminal</title>
 <meta name="description" content="Personal options trading operations terminal — strategy building, risk management, position sizing and trade journaling.">
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#0a0d16">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="./icons/icon-16.png">
+<link rel="shortcut icon" href="./icons/favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="./icons/icon-180.png">
+<link rel="apple-touch-icon" sizes="152x152" href="./icons/icon-152.png">
+<link rel="apple-touch-icon" sizes="167x167" href="./icons/icon-167.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AlgoPilot">
+<meta name="msapplication-TileColor" content="#0a0d16">
+<meta name="msapplication-TileImage" content="./icons/icon-144.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -562,6 +576,7 @@ tr:last-child td{border-bottom:none;}
       <div class="topbar-right">
         <button class="palette-btn" id="palette-trigger-desktop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>Search<kbd>⌘K</kbd></button>
         <button class="icon-btn" id="palette-trigger-mobile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg></button>
+        <button class="btn btn-primary btn-sm" id="install-app-btn" style="display:none;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>Install App</button>
         <div class="roadmap-pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4.5L18.5 21 12 16.5 5.5 21l2-7.5L2 9h7z"/></svg><span id="topbar-roadmap-text">Month 1/6</span></div>
       </div>
     </header>
@@ -688,8 +703,8 @@ const LOCKED_COPY = {
 
 // ---------- INDEXEDDB LAYER ----------
 const DB_NAME = 'algopilot_db';
-const DB_VERSION = 1;
-const STORES = ['strategies','journal','backups','checklist','watchlist'];
+const DB_VERSION = 2;
+const STORES = ['strategies','journal','backups','checklist','watchlist','paperPositions','paperOrders'];
 let dbInstance = null;
 
 function openDatabase(){
@@ -761,6 +776,7 @@ function loadSettings(){
     currentMonth:1, currency:'INR', locale:'en-IN',
     riskPerTradePct:2, maxDailyLossPct:5, maxWeeklyLossPct:10,
     totalCapital:1000000, lastBackupAt:null,
+    paperCapital:1000000, paperBrokeragePerOrder:20, riskFreeRatePct:6.5, defaultIV:18,
   };
   try{
     const raw = localStorage.getItem(LS_KEY);
@@ -786,6 +802,8 @@ const state = {
   watchlist:[],
   checklist:[],
   checklistLog:loadChecklistLog(),
+  paperPositions:[],
+  paperOrders:[],
   ready:false,
 };
 
@@ -1142,6 +1160,8 @@ async function reloadAllData(){
   state.journal = await dbGetAll('journal');
   state.watchlist = await dbGetAll('watchlist');
   state.checklist = await dbGetAll('checklist');
+  state.paperPositions = await dbGetAll('paperPositions');
+  state.paperOrders = await dbGetAll('paperOrders');
   updateEquityPulse();
 }
 
@@ -1194,6 +1214,9 @@ async function initApp(){
   renderMobileNav();
   wireGlobalEvents();
   updateEquityPulse();
+  MarketDataService.init();
+  registerServiceWorker();
+  wireInstallFlow();
   navigateTo('dashboard');
   setInterval(runAutoBackup, 5*60*1000);
   state.ready = true;
@@ -1492,8 +1515,23 @@ function renderSettings(container){
     </div>
 
     <div class="card" style="margin-top:16px;">
+      <div class="card-title"><span>Market Data & Paper Account</span>${lucideIcon('radio')}</div>
+      <p class="sub" style="margin-bottom:12px;">Active provider: <strong style="color:var(--text-primary)">${escapeHtml(MarketDataService.providerLabel())}</strong>. Real providers need their own API credentials before they can go live — wire one up by extending its adapter class once you have them.</p>
+      <div class="rm-chips" style="margin-bottom:16px;">
+        ${MARKET_DATA_PROVIDERS.map(p=>`<span class="rm-chip" style="${p.id===MarketDataService.providerId?'background:var(--accent-soft);color:var(--accent);':''}">${p.needsCredentials?lucideIcon('lock'):lucideIcon('check')} ${escapeHtml(p.label)}</span>`).join('')}
+      </div>
+      <div class="divider"></div>
+      <div class="field"><label>Paper trading virtual capital</label><input type="number" id="set-papercapital" value="${s.paperCapital}"></div>
+      <div class="row-2">
+        <div class="field"><label>Simulated brokerage / order</label><input type="number" id="set-paperbrokerage" value="${s.paperBrokeragePerOrder}"></div>
+        <div class="field"><label>Default IV assumption (%)</label><input type="number" step="0.5" id="set-defaultiv" value="${s.defaultIV}"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="save-paper-settings">${lucideIcon('check')} Save paper trading defaults</button>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
       <div class="card-title"><span>About</span>${lucideIcon('info')}</div>
-      <div class="disclaimer-box">AlgoPilot is a personal trading journal, backtesting and risk-tracking tool for your own education and record-keeping. It does not place real trades, connect to a broker, or provide financial advice — all figures are derived solely from data you enter.</div>
+      <div class="disclaimer-box">AlgoPilot is a personal trading journal, backtesting, risk-tracking and paper-trading practice tool for your own education and record-keeping. Paper Trading uses a clearly-labelled simulated price feed and simplified margin/brokerage approximations — it does not place real trades, connect to a live broker, or provide financial advice. All figures are derived solely from data you enter or from the simulated feed.</div>
     </div>
   `;
   renderRoadmapCards();
@@ -1547,6 +1585,14 @@ function wireSettingsEvents(){
     saveSettings(s);
     showToast('Trading defaults saved', 'success');
   });
+  document.getElementById('save-paper-settings').addEventListener('click', ()=>{
+    const s = state.settings;
+    s.paperCapital = Number(document.getElementById('set-papercapital').value)||0;
+    s.paperBrokeragePerOrder = Number(document.getElementById('set-paperbrokerage').value)||0;
+    s.defaultIV = Number(document.getElementById('set-defaultiv').value)||1;
+    saveSettings(s);
+    showToast('Paper trading defaults saved', 'success');
+  });
   document.getElementById('backup-now').addEventListener('click', async ()=>{
     await runAutoBackup();
     showToast('Backup saved', 'success');
@@ -1558,9 +1604,10 @@ function wireSettingsEvents(){
 
 function exportAllDataJson(){
   const payload = {
-    exportedAt:new Date().toISOString(), version:1,
+    exportedAt:new Date().toISOString(), version:2,
     strategies:state.strategies, journal:state.journal, watchlist:state.watchlist,
     checklist:state.checklist, settings:state.settings,
+    paperPositions:state.paperPositions, paperOrders:state.paperOrders,
   };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -1580,15 +1627,17 @@ function importDataJson(e){
     catch(err){ showToast('That file is not valid JSON', 'error'); return; }
     showConfirm({
       title:'Overwrite current data?',
-      message:'Importing will replace all strategies, journal entries, watchlist and checklist items currently stored. This cannot be undone.',
+      message:'Importing will replace all strategies, journal entries, watchlist, checklist items and paper trading history currently stored. This cannot be undone.',
       okLabel:'Import & overwrite',
       onConfirm: async ()=>{
         try{
-          for(const store of ['strategies','journal','watchlist','checklist']){ await dbClear(store); }
+          for(const store of ['strategies','journal','watchlist','checklist','paperPositions','paperOrders']){ await dbClear(store); }
           for(const item of (data.strategies||[])) await dbPut('strategies', item);
           for(const item of (data.journal||[])) await dbPut('journal', item);
           for(const item of (data.watchlist||[])) await dbPut('watchlist', item);
           for(const item of (data.checklist||[])) await dbPut('checklist', item);
+          for(const item of (data.paperPositions||[])) await dbPut('paperPositions', item);
+          for(const item of (data.paperOrders||[])) await dbPut('paperOrders', item);
           if(data.settings) { state.settings = Object.assign(state.settings, data.settings); saveSettings(state.settings); }
           await reloadAllData();
           renderSidebarNav();
@@ -2669,6 +2718,782 @@ VIEW_RENDERERS.analytics = (container)=> renderAnalyticsHub(container, 'overview
 VIEW_RENDERERS.performanceMetrics = (container)=> renderAnalyticsHub(container, 'metrics');
 VIEW_RENDERERS.equityCurve = (container)=> renderAnalyticsHub(container, 'equity');
 VIEW_RENDERERS.drawdownAnalysis = (container)=> renderAnalyticsHub(container, 'drawdown');
+
+/* ============================================================
+   PART 8 — MARKET DATA SERVICE (provider-agnostic abstraction)
+
+   Design: every adapter (real or simulated) implements the same
+   contract so the rest of the app never hardcodes a provider:
+     connect()                      -> Promise<void>
+     disconnect()                   -> void
+     getQuote(symbol)                -> quote object | null
+     getAllQuotes()                  -> array of quote objects
+     onTick(callback)                -> subscribe; returns unsubscribe fn
+     isConfigured()                  -> boolean (has real credentials)
+     providerName                    -> string label for the UI
+
+   Today only SimulatedMarketDataAdapter actually produces data —
+   it generates a believable but explicitly-labelled synthetic
+   feed so every downstream module (Paper Trading, future Option
+   Chain) is fully testable without any live connection. The real
+   adapters below are interface-complete skeletons: wire in
+   credentials and the marked TODOs to bring one online — nothing
+   downstream needs to change when you do, since everything talks
+   to MarketDataService, never to a specific provider.
+   ============================================================ */
+
+const MARKET_SYMBOLS = [
+  {symbol:'NIFTY',      name:'Nifty 50',            type:'index', basePrice:23150, lotSize:65,  strikeStep:50},
+  {symbol:'BANKNIFTY',  name:'Bank Nifty',           type:'index', basePrice:57500, lotSize:30,  strikeStep:100},
+  {symbol:'FINNIFTY',   name:'Nifty Financial Svcs', type:'index', basePrice:21800, lotSize:60,  strikeStep:50},
+  {symbol:'MIDCPNIFTY', name:'Nifty Midcap Select',  type:'index', basePrice:12400, lotSize:120, strikeStep:25},
+  {symbol:'SENSEX',     name:'BSE Sensex',           type:'index', basePrice:73900, lotSize:20,  strikeStep:100},
+  {symbol:'RELIANCE',   name:'Reliance Industries',  type:'stock', basePrice:1450,  lotSize:300, strikeStep:10},
+  {symbol:'HDFCBANK',   name:'HDFC Bank',            type:'stock', basePrice:1950,  lotSize:550, strikeStep:10},
+  {symbol:'ICICIBANK',  name:'ICICI Bank',           type:'stock', basePrice:1450,  lotSize:700, strikeStep:10},
+  {symbol:'AXISBANK',   name:'Axis Bank',            type:'stock', basePrice:1200,  lotSize:625, strikeStep:10},
+  {symbol:'SBIN',       name:'State Bank of India',  type:'stock', basePrice:820,   lotSize:750, strikeStep:5},
+];
+// Seed values approximate mid-2026 levels and NSE's Jan-2026 lot-size revision; this is a
+// SIMULATED feed, so treat these as a realistic starting point, not live quotes.
+
+// ---------- BLACK-SCHOLES (real, correct math — used to price simulated option premiums) ----------
+function erf(x){
+  // Abramowitz-Stegun approximation, ~1.5e-7 max error — plenty for premium estimation.
+  const sign = x<0 ? -1 : 1; x = Math.abs(x);
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const t = 1/(1+p*x);
+  const y = 1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+function normCdf(x){ return 0.5*(1+erf(x/Math.SQRT2)); }
+function normPdf(x){ return Math.exp(-x*x/2)/Math.sqrt(2*Math.PI); }
+function blackScholes(S, K, daysToExpiry, ratePct, ivPct, optionType){
+  const T = Math.max(daysToExpiry,0.5)/365;
+  const r = (ratePct||0)/100, sigma = Math.max((ivPct||1)/100, 0.01);
+  const d1 = (Math.log(S/K) + (r + sigma*sigma/2)*T) / (sigma*Math.sqrt(T));
+  const d2 = d1 - sigma*Math.sqrt(T);
+  let price, delta;
+  if(optionType==='call'){
+    price = S*normCdf(d1) - K*Math.exp(-r*T)*normCdf(d2);
+    delta = normCdf(d1);
+  }else{
+    price = K*Math.exp(-r*T)*normCdf(-d2) - S*normCdf(-d1);
+    delta = normCdf(d1)-1;
+  }
+  const gamma = normPdf(d1)/(S*sigma*Math.sqrt(T));
+  const vega = S*normPdf(d1)*Math.sqrt(T)/100;
+  const theta = optionType==='call'
+    ? (-S*normPdf(d1)*sigma/(2*Math.sqrt(T)) - r*K*Math.exp(-r*T)*normCdf(d2))/365
+    : (-S*normPdf(d1)*sigma/(2*Math.sqrt(T)) + r*K*Math.exp(-r*T)*normCdf(-d2))/365;
+  return {price:Math.max(price,0.05), delta, gamma, theta, vega};
+}
+
+// ---------- SIMULATED ADAPTER (the only one that actually produces ticks today) ----------
+class SimulatedMarketDataAdapter{
+  constructor(){
+    this.providerName = 'Simulated Feed';
+    this.quotes = {};
+    this.listeners = [];
+    this.timer = null;
+    MARKET_SYMBOLS.forEach(s=>{
+      this.quotes[s.symbol] = {
+        symbol:s.symbol, name:s.name, type:s.type, ltp:s.basePrice, prevClose:s.basePrice,
+        open:s.basePrice, high:s.basePrice, low:s.basePrice, volume:0, oi:0,
+        bid:s.basePrice-0.5, ask:s.basePrice+0.5, changePct:0, lotSize:s.lotSize, strikeStep:s.strikeStep,
+      };
+    });
+  }
+  isConfigured(){ return true; }
+  connect(){ this.start(); return Promise.resolve(); }
+  disconnect(){ this.stop(); }
+  start(){
+    if(this.timer) return;
+    this.timer = setInterval(()=>this._tick(), 1500);
+  }
+  stop(){ if(this.timer){ clearInterval(this.timer); this.timer=null; } }
+  _tick(){
+    MARKET_SYMBOLS.forEach(s=>{
+      const q = this.quotes[s.symbol];
+      const volScale = s.type==='index' ? 0.0009 : 0.0014;
+      const drift = (Math.random()-0.5)*2*volScale;
+      const jump = Math.random()<0.04 ? (Math.random()-0.5)*volScale*6 : 0;
+      q.ltp = Math.max(1, q.ltp*(1+drift+jump));
+      q.high = Math.max(q.high, q.ltp);
+      q.low = Math.min(q.low, q.ltp);
+      q.volume += Math.round(Math.random()*50000);
+      q.oi = Math.max(0, q.oi + Math.round((Math.random()-0.45)*20000));
+      q.changePct = ((q.ltp-q.prevClose)/q.prevClose)*100;
+      q.bid = q.ltp - q.ltp*0.0003;
+      q.ask = q.ltp + q.ltp*0.0003;
+    });
+    this.listeners.forEach(cb=>{ try{ cb(this.getAllQuotes()); }catch(e){ console.error('tick listener error', e); } });
+  }
+  getQuote(symbol){ return this.quotes[symbol] ? Object.assign({}, this.quotes[symbol]) : null; }
+  getAllQuotes(){ return MARKET_SYMBOLS.map(s=>this.getQuote(s.symbol)); }
+  onTick(callback){
+    this.listeners.push(callback);
+    return ()=>{ this.listeners = this.listeners.filter(c=>c!==callback); };
+  }
+}
+
+// ---------- REAL PROVIDER ADAPTERS (interface-complete skeletons — 🔧 need your credentials) ----------
+// Each follows the exact same contract as SimulatedMarketDataAdapter above. To bring one online:
+// fill in the constructor credentials, implement connect() against the provider's real
+// REST/WebSocket endpoint, and map their tick payload onto the same quote shape used above
+// (symbol, ltp, open, high, low, volume, oi, bid, ask, changePct). Nothing else in the app
+// needs to change — MarketDataService.setProvider() swaps the active adapter transparently.
+class BaseStubAdapter{
+  constructor(providerName, credentials){
+    this.providerName = providerName;
+    this.credentials = credentials || {};
+    this.listeners = [];
+  }
+  isConfigured(){ return false; } // flip once real credential fields are filled & validated
+  connect(){ return Promise.reject(new Error(this.providerName+' is not configured yet — add API credentials in Settings to enable.')); }
+  disconnect(){}
+  getQuote(){ return null; }
+  getAllQuotes(){ return []; }
+  onTick(callback){ this.listeners.push(callback); return ()=>{ this.listeners = this.listeners.filter(c=>c!==callback); }; }
+}
+// 🔧 Shoonya (Finvasia) — needs: userId, password (TOTP), vendor API key. REST login + WebSocket ticks.
+class ShoondaAdapter extends BaseStubAdapter{ constructor(creds){ super('Shoonya', creds); } }
+// 🔧 Upstox — needs: API key, API secret, OAuth redirect URI + access token refresh flow.
+class UpstoxAdapter extends BaseStubAdapter{ constructor(creds){ super('Upstox', creds); } }
+// 🔧 Angel One Smart API — needs: API key, client code, MPIN/TOTP, JWT session refresh.
+class AngelOneAdapter extends BaseStubAdapter{ constructor(creds){ super('Angel One', creds); } }
+// 🔧 Zerodha Kite Connect — needs: API key + secret (paid, ~₹2000/mo), OAuth login flow, request token exchange.
+class KiteConnectAdapter extends BaseStubAdapter{ constructor(creds){ super('Zerodha Kite Connect', creds); } }
+// 🔧 Fyers — needs: app ID, secret key, OAuth redirect + auth code exchange.
+class FyersAdapter extends BaseStubAdapter{ constructor(creds){ super('Fyers', creds); } }
+// 🔧 Polygon.io — needs: API key. Note: free/basic tiers cover US equities, not NSE/BSE indices —
+// only useful here if you specifically want US-listed instruments alongside the Indian ones.
+class PolygonAdapter extends BaseStubAdapter{ constructor(creds){ super('Polygon.io', creds); } }
+// 🔧 TwelveData — needs: API key. Same Indian-market coverage caveat as Polygon.io above.
+class TwelveDataAdapter extends BaseStubAdapter{ constructor(creds){ super('TwelveData', creds); } }
+
+const MARKET_DATA_PROVIDERS = [
+  {id:'simulated', label:'Simulated Feed', cls:SimulatedMarketDataAdapter, needsCredentials:false},
+  {id:'shoonya', label:'Shoonya', cls:ShoondaAdapter, needsCredentials:true},
+  {id:'upstox', label:'Upstox', cls:UpstoxAdapter, needsCredentials:true},
+  {id:'angelone', label:'Angel One', cls:AngelOneAdapter, needsCredentials:true},
+  {id:'kite', label:'Zerodha Kite Connect', cls:KiteConnectAdapter, needsCredentials:true},
+  {id:'fyers', label:'Fyers', cls:FyersAdapter, needsCredentials:true},
+  {id:'polygon', label:'Polygon.io', cls:PolygonAdapter, needsCredentials:true},
+  {id:'twelvedata', label:'TwelveData', cls:TwelveDataAdapter, needsCredentials:true},
+];
+
+const MarketDataService = {
+  adapter: new SimulatedMarketDataAdapter(),
+  providerId: 'simulated',
+  init(){ this.adapter.connect(); },
+  getQuote(symbol){ return this.adapter.getQuote(symbol); },
+  getAllQuotes(){ return this.adapter.getAllQuotes(); },
+  onTick(cb){ return this.adapter.onTick(cb); },
+  isLive(){ return this.providerId !== 'simulated'; },
+  providerLabel(){ const p = MARKET_DATA_PROVIDERS.find(x=>x.id===this.providerId); return p ? p.label : 'Unknown'; },
+  setProvider(id, credentials){
+    const def = MARKET_DATA_PROVIDERS.find(p=>p.id===id);
+    if(!def) return Promise.reject(new Error('Unknown provider'));
+    if(def.needsCredentials && (!credentials || Object.keys(credentials).length===0)){
+      return Promise.reject(new Error(def.label+' requires API credentials before it can be enabled.'));
+    }
+    const next = def.id==='simulated' ? new SimulatedMarketDataAdapter() : new def.cls(credentials);
+    return next.connect().then(()=>{
+      this.adapter.disconnect();
+      this.adapter = next;
+      this.providerId = id;
+    });
+  },
+};
+
+function findSymbolMeta(symbol){ return MARKET_SYMBOLS.find(s=>s.symbol===symbol); }
+function roundToStrikeStep(price, step){ step = step||50; return Math.round(price/step)*step; }
+
+/* ============================================================
+   PART 9 — PAPER TRADING ENGINE (positions, orders, margin,
+   brokerage/charges simulation, account metrics)
+
+   Accounting model (no double-counting):
+     Equity            = capital + realizedPnl(all) + unrealizedMTM(open)
+     Available balance = capital + realizedPnl(all) - usedMargin
+     Net profit         = realizedPnl(all) + unrealizedMTM(open)
+   Margin and brokerage below are simplified educational
+   approximations, not broker-accurate SPAN/exposure margin.
+   ============================================================ */
+
+function computePaperPositionMargin(position){
+  const notional = (position.strike || position.avgPrice || 0) * position.qty * position.lotSize;
+  if(position.instrumentType==='future') return notional * 0.12;
+  if(position.side==='long') return position.avgPrice * position.qty * position.lotSize; // full premium debit
+  return notional * 0.15; // short option — rough SPAN+exposure approximation
+}
+function computeBrokerageAndCharges(orderValue){
+  const brokerage = Number(state.settings.paperBrokeragePerOrder) || 20;
+  const charges = Math.abs(orderValue) * 0.0008; // rough blended STT/stamp/GST/exchange approximation
+  return {brokerage, charges, total: brokerage + charges};
+}
+function legPnlPerUnit(position, price){
+  return position.side==='long' ? (price - position.avgPrice) : (position.avgPrice - price);
+}
+function currentPaperPrice(position){
+  const quote = MarketDataService.getQuote(position.symbol);
+  if(!quote) return position.avgPrice;
+  if(position.instrumentType==='future') return quote.ltp;
+  const dte = Math.max(0.5, position.daysToExpiryAtOpen || 7);
+  const bs = blackScholes(quote.ltp, position.strike, dte, state.settings.riskFreeRatePct, state.settings.defaultIV, position.optionType);
+  return bs.price;
+}
+
+async function openPaperPosition(params){
+  const now = new Date().toISOString();
+  const position = {
+    id:uid(), symbol:params.symbol, instrumentType:params.instrumentType,
+    optionType:params.optionType||null, strike:params.strike||null, daysToExpiryAtOpen:params.daysToExpiry||null,
+    side:params.side, qty:params.qty, avgPrice:params.price, lotSize:params.lotSize,
+    productType:params.productType, status:'open', openedAt:now, closedAt:null,
+    realizedPnl:0, exits:[],
+  };
+  await dbPut('paperPositions', position);
+  state.paperPositions.push(position);
+  const orderValue = params.price*params.qty*params.lotSize;
+  const ch = computeBrokerageAndCharges(orderValue);
+  const order = {id:uid(), timestamp:now, positionId:position.id, symbol:params.symbol, action:'open',
+    side:params.side==='long'?'buy':'sell', qty:params.qty, price:params.price, brokerage:ch.brokerage, charges:ch.charges, realizedPnlImpact:0};
+  await dbPut('paperOrders', order);
+  state.paperOrders.push(order);
+  return position;
+}
+async function addToPaperPosition(positionId, addQty, price){
+  const position = state.paperPositions.find(p=>p.id===positionId);
+  if(!position || position.status!=='open' || addQty<=0) return;
+  const totalQty = position.qty + addQty;
+  position.avgPrice = ((position.avgPrice*position.qty) + (price*addQty)) / totalQty;
+  position.qty = totalQty;
+  await dbPut('paperPositions', position);
+  const ch = computeBrokerageAndCharges(price*addQty*position.lotSize);
+  const order = {id:uid(), timestamp:new Date().toISOString(), positionId, symbol:position.symbol, action:'add',
+    side:position.side==='long'?'buy':'sell', qty:addQty, price, brokerage:ch.brokerage, charges:ch.charges, realizedPnlImpact:0};
+  await dbPut('paperOrders', order);
+  state.paperOrders.push(order);
+}
+async function partialExitPaperPosition(positionId, exitQty, exitPrice){
+  const position = state.paperPositions.find(p=>p.id===positionId);
+  if(!position || position.status!=='open') return 0;
+  exitQty = Math.min(Math.max(0,exitQty), position.qty);
+  if(exitQty<=0) return 0;
+  const pnlPerUnit = legPnlPerUnit(position, exitPrice);
+  const grossPnl = pnlPerUnit * exitQty * position.lotSize;
+  const ch = computeBrokerageAndCharges(exitPrice*exitQty*position.lotSize);
+  const netPnl = grossPnl - ch.total;
+  position.realizedPnl = (position.realizedPnl||0) + netPnl;
+  position.qty -= exitQty;
+  position.exits.push({qty:exitQty, price:exitPrice, timestamp:new Date().toISOString(), pnl:netPnl});
+  const wasFullExit = position.qty<=0;
+  if(wasFullExit){ position.status='closed'; position.closedAt=new Date().toISOString(); }
+  await dbPut('paperPositions', position);
+  const order = {id:uid(), timestamp:new Date().toISOString(), positionId, symbol:position.symbol,
+    action: wasFullExit?'full-exit':'partial-exit', side:position.side==='long'?'sell':'buy', qty:exitQty,
+    price:exitPrice, brokerage:ch.brokerage, charges:ch.charges, realizedPnlImpact:netPnl};
+  await dbPut('paperOrders', order);
+  state.paperOrders.push(order);
+  return netPnl;
+}
+async function fullExitPaperPosition(positionId, exitPrice){
+  const position = state.paperPositions.find(p=>p.id===positionId);
+  if(!position) return 0;
+  return partialExitPaperPosition(positionId, position.qty, exitPrice);
+}
+async function reversePaperPosition(positionId, exitPrice){
+  const position = state.paperPositions.find(p=>p.id===positionId);
+  if(!position || position.status!=='open') return null;
+  const {qty, side, symbol, instrumentType, optionType, strike, productType, lotSize, daysToExpiryAtOpen} = position;
+  await fullExitPaperPosition(positionId, exitPrice);
+  return openPaperPosition({
+    symbol, instrumentType, optionType, strike, daysToExpiry:daysToExpiryAtOpen,
+    side: side==='long'?'short':'long', qty, price:exitPrice, productType, lotSize,
+  });
+}
+
+function computePaperTradingMetrics(){
+  const capital = Number(state.settings.paperCapital)||0;
+  const open = state.paperPositions.filter(p=>p.status==='open');
+  const closed = state.paperPositions.filter(p=>p.status==='closed');
+
+  let mtmTotal = 0, usedMargin = 0, exposure = 0;
+  open.forEach(p=>{
+    const price = currentPaperPrice(p);
+    mtmTotal += legPnlPerUnit(p, price) * p.qty * p.lotSize;
+    usedMargin += computePaperPositionMargin(p);
+    exposure += (p.strike||p.avgPrice||0) * p.qty * p.lotSize;
+  });
+
+  const realizedTotal = state.paperPositions.reduce((s,p)=> s+(p.realizedPnl||0), 0);
+  const netProfit = realizedTotal + mtmTotal;
+  const equity = capital + netProfit;
+  const availableBalance = capital + realizedTotal - usedMargin;
+  const roiPct = capital>0 ? (netProfit/capital)*100 : 0;
+
+  // per-position (not per-fill) trade stats from fully closed positions
+  const wins = closed.filter(p=>p.realizedPnl>0);
+  const losses = closed.filter(p=>p.realizedPnl<0);
+  const winRate = closed.length ? (wins.length/closed.length)*100 : 0;
+  const avgWin = wins.length ? wins.reduce((s,p)=>s+p.realizedPnl,0)/wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s,p)=>s+p.realizedPnl,0)/losses.length : 0;
+  const grossProfit = wins.reduce((s,p)=>s+p.realizedPnl,0);
+  const grossLoss = Math.abs(losses.reduce((s,p)=>s+p.realizedPnl,0));
+  const profitFactor = grossLoss>0 ? grossProfit/grossLoss : (grossProfit>0?Infinity:0);
+  const expectancy = closed.length ? ((winRate/100)*avgWin + (1-winRate/100)*avgLoss) : 0;
+  const rrRatio = (avgLoss!==0) ? Math.abs(avgWin/avgLoss) : 0;
+
+  const sortedClosed = [...closed].sort((a,b)=> new Date(a.closedAt)-new Date(b.closedAt));
+  let maxConsecutiveLosses=0, curLossStreak=0;
+  sortedClosed.forEach(p=>{
+    if(p.realizedPnl<0){ curLossStreak++; maxConsecutiveLosses=Math.max(maxConsecutiveLosses,curLossStreak); }
+    else curLossStreak=0;
+  });
+
+  // equity curve from chronological realized events, ending with the live MTM point
+  const events = [];
+  state.paperPositions.forEach(p=> (p.exits||[]).forEach(ex=> events.push({date:ex.timestamp, pnl:ex.pnl})));
+  events.sort((a,b)=> new Date(a.date)-new Date(b.date));
+  let cum = 0, peak = 0; const curve = [];
+  events.forEach(ev=>{ cum += ev.pnl; peak = Math.max(peak, cum); curve.push({date:ev.date, equity:capital+cum, drawdownPct:peak!==0?((cum-peak)/capital)*100:0}); });
+  if(curve.length===0 || Math.abs(mtmTotal)>0.01){ curve.push({date:new Date().toISOString(), equity, drawdownPct: peak!==0?(((cum+mtmTotal)-Math.max(peak,cum+mtmTotal))/capital)*100:0}); }
+  const maxDrawdownPct = curve.length ? Math.min(...curve.map(c=>c.drawdownPct)) : 0;
+  const currentDrawdownPct = curve.length ? curve[curve.length-1].drawdownPct : 0;
+
+  // Sharpe ratio from daily realized returns (sparse series across trading days with activity)
+  const dayMap = {};
+  events.forEach(ev=>{ const d=ev.date.slice(0,10); dayMap[d]=(dayMap[d]||0)+ev.pnl; });
+  const dailyReturns = Object.values(dayMap).map(p=> capital>0 ? p/capital : 0);
+  let sharpe = 0;
+  if(dailyReturns.length>1){
+    const mean = dailyReturns.reduce((a,b)=>a+b,0)/dailyReturns.length;
+    const variance = dailyReturns.reduce((a,b)=>a+(b-mean)*(b-mean),0)/dailyReturns.length;
+    const stdev = Math.sqrt(variance);
+    sharpe = stdev>0 ? (mean/stdev)*Math.sqrt(252) : 0;
+  }
+
+  const today = todayISO();
+  const todayEvents = events.filter(e=>e.date.slice(0,10)===today);
+  const todayRealized = todayEvents.reduce((s,e)=>s+e.pnl,0);
+  const todayPnl = todayRealized + mtmTotal; // today's open MTM counts toward today's P&L too
+  const monthStart = daysAgo(30);
+  const monthRealized = events.filter(e=> new Date(e.date)>=monthStart).reduce((s,e)=>s+e.pnl,0);
+
+  return {capital, equity, availableBalance, usedMargin, exposure, realizedTotal, mtmTotal, netProfit, roiPct,
+    openCount:open.length, closedCount:closed.length, winRate, avgWin, avgLoss, profitFactor, expectancy, rrRatio,
+    maxConsecutiveLosses, maxDrawdownPct, currentDrawdownPct, sharpe, curve, todayPnl, monthRealized};
+}
+
+async function resetPaperAccount(){
+  for(const p of state.paperPositions.slice()) await dbDelete('paperPositions', p.id);
+  for(const o of state.paperOrders.slice()) await dbDelete('paperOrders', o.id);
+  state.paperPositions = [];
+  state.paperOrders = [];
+}
+
+/* ============================================================
+   PART 10 — PAPER TRADING UI
+   ============================================================ */
+let paperTickUnsubscribe = null;
+let orderForm = {};
+
+function paperKpiGridHtml(m){
+  return `<div class="kpi-grid">
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('wallet')}Equity</div><div class="kpi-value ${pnlClass(m.netProfit)}" id="pt-kpi-equity">${formatMoney(m.equity)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('piggy-bank')}Available Balance</div><div class="kpi-value" id="pt-kpi-available">${formatMoney(m.availableBalance)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('lock')}Used Margin</div><div class="kpi-value" id="pt-kpi-margin">${formatMoney(m.usedMargin)}</div><div class="kpi-sub" id="pt-kpi-margin-pct">${formatPct(m.capital>0?(m.usedMargin/m.capital)*100:0)} of capital</div></div>
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('calendar')}Today's P&L</div><div class="kpi-value ${pnlClass(m.todayPnl)}" id="pt-kpi-today">${formatMoney(m.todayPnl)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('trending-up')}Net Profit</div><div class="kpi-value ${pnlClass(m.netProfit)}" id="pt-kpi-netprofit">${formatMoney(m.netProfit)}</div><div class="kpi-sub" id="pt-kpi-roi">${formatPct(m.roiPct,1)} ROI</div></div>
+    <div class="kpi-card"><div class="kpi-label">${lucideIcon('trending-down')}Max Drawdown</div><div class="kpi-value loss">${formatPct(Math.abs(m.maxDrawdownPct),1)}</div></div>
+  </div>`;
+}
+function updatePaperKpisInPlace(){
+  const m = computePaperTradingMetrics();
+  const set=(id,val,cls)=>{ const el=document.getElementById(id); if(el){ el.textContent=val; if(cls!==undefined) el.className='kpi-value '+cls; } };
+  set('pt-kpi-equity', formatMoney(m.equity), pnlClass(m.netProfit));
+  set('pt-kpi-available', formatMoney(m.availableBalance));
+  set('pt-kpi-margin', formatMoney(m.usedMargin));
+  const mp = document.getElementById('pt-kpi-margin-pct'); if(mp) mp.textContent = formatPct(m.capital>0?(m.usedMargin/m.capital)*100:0)+' of capital';
+  set('pt-kpi-today', formatMoney(m.todayPnl), pnlClass(m.todayPnl));
+  set('pt-kpi-netprofit', formatMoney(m.netProfit), pnlClass(m.netProfit));
+  const roi = document.getElementById('pt-kpi-roi'); if(roi) roi.textContent = formatPct(m.roiPct,1)+' ROI';
+}
+
+function renderPaperTicker(){
+  const tbody = document.getElementById('pt-ticker-body');
+  if(!tbody) return;
+  tbody.innerHTML = MarketDataService.getAllQuotes().map(q=>`<tr>
+    <td><strong>${q.symbol}</strong><div class="sub" style="font-size:10.5px;">${escapeHtml(q.name)}</div></td>
+    <td class="mono">${formatNum(q.ltp,2)}</td>
+    <td class="mono ${q.changePct>=0?'profit':'loss'}">${q.changePct>=0?'+':''}${formatNum(q.changePct,2)}%</td>
+    <td class="mono">${formatNum(q.high,2)}</td>
+    <td class="mono">${formatNum(q.low,2)}</td>
+    <td><button class="btn btn-ghost btn-sm" data-action="trade-symbol" data-symbol="${q.symbol}">Trade</button></td>
+  </tr>`).join('');
+  tbody.querySelectorAll('[data-action="trade-symbol"]').forEach(btn=>{
+    btn.addEventListener('click', ()=> openPaperOrderTicket(btn.dataset.symbol));
+  });
+}
+
+function renderPaperPositions(){
+  const wrap = document.getElementById('pt-positions-list');
+  if(!wrap) return;
+  const open = state.paperPositions.filter(p=>p.status==='open');
+  if(open.length===0){ wrap.innerHTML = emptyState('layers','No open positions','Use New Position above, or Trade next to any quote.'); return; }
+  wrap.innerHTML = open.map(positionRowHtml).join('');
+  wrap.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const map = {'pt-add':'add','pt-partial':'partial','pt-full':'full','pt-reverse':'reverse'};
+      openPositionActionSheet(btn.dataset.id, map[btn.dataset.action]);
+    });
+  });
+  refreshIcons();
+}
+function positionRowHtml(p){
+  const price = currentPaperPrice(p);
+  const pnl = legPnlPerUnit(p,price) * p.qty * p.lotSize;
+  const label = p.instrumentType==='future' ? (p.symbol+' FUT') : (p.symbol+' '+p.strike+' '+(p.optionType==='call'?'CE':'PE'));
+  return `<div class="list-row" style="align-items:flex-start;flex-wrap:wrap;gap:10px;">
+    <div style="flex:1;min-width:160px;">
+      <div style="font-weight:600;font-size:13.5px;">${escapeHtml(label)} <span class="badge badge-${p.side==='long'?'profit':'loss'}" style="margin-left:4px;">${p.side==='long'?'LONG':'SHORT'}</span></div>
+      <div class="sub" style="font-size:11.5px;margin-top:3px;">${p.qty} lot${p.qty>1?'s':''} · avg ${formatMoney(p.avgPrice)} · ${p.productType}</div>
+    </div>
+    <div style="text-align:right;min-width:100px;">
+      <div class="mono ${pnlClass(pnl)}" style="font-weight:600;font-size:14px;">${formatMoney(pnl)}</div>
+      <div class="sub" style="font-size:11px;">LTP ${formatNum(price,2)}</div>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;width:100%;margin-top:4px;">
+      <button class="btn btn-ghost btn-sm" data-action="pt-add" data-id="${p.id}">${lucideIcon('plus')} Add</button>
+      <button class="btn btn-ghost btn-sm" data-action="pt-partial" data-id="${p.id}">${lucideIcon('minus-circle')} Partial Exit</button>
+      <button class="btn btn-ghost btn-sm" data-action="pt-full" data-id="${p.id}">${lucideIcon('x-circle')} Full Exit</button>
+      <button class="btn btn-ghost btn-sm" data-action="pt-reverse" data-id="${p.id}">${lucideIcon('repeat')} Reverse</button>
+    </div>
+  </div>`;
+}
+function openPositionActionSheet(positionId, mode){
+  const position = state.paperPositions.find(p=>p.id===positionId);
+  if(!position) return;
+  const currentPrice = currentPaperPrice(position);
+  const titles = {add:'Add to Position', partial:'Partial Exit', full:'Full Exit', reverse:'Reverse Position'};
+  const bodyEl = document.createElement('div');
+  bodyEl.innerHTML = `
+    <p class="sub" style="margin-bottom:14px;">${escapeHtml(position.symbol)} ${position.instrumentType==='option'?(position.strike+' '+(position.optionType==='call'?'CE':'PE')):'FUT'} · ${position.side==='long'?'LONG':'SHORT'} ${position.qty} lot${position.qty>1?'s':''}</p>
+    ${mode==='add'||mode==='partial' ? `<div class="field"><label>Qty (lots)</label><input type="number" id="pa-qty" value="${mode==='add'?1:position.qty}" min="1" ${mode==='partial'?('max="'+position.qty+'"'):''}></div>` : ''}
+    <div class="field"><label>Price</label><input type="number" id="pa-price" value="${formatNum(currentPrice,2)}"></div>
+    <p class="sub" style="font-size:11.5px;">${lucideIcon('info')} Price defaults to the current Black-Scholes estimate off the simulated feed — edit it to test a different fill.</p>
+  `;
+  const footerEl = document.createElement('div');
+  footerEl.style.display='flex'; footerEl.style.gap='10px'; footerEl.style.width='100%';
+  footerEl.innerHTML = `<button class="btn btn-ghost btn-block" id="pa-cancel">Cancel</button><button class="btn btn-primary btn-block" id="pa-confirm">${lucideIcon('check')} Confirm</button>`;
+  openSheet({title:titles[mode], bodyEl, footerEl});
+  document.getElementById('pa-cancel').addEventListener('click', closeSheet);
+  document.getElementById('pa-confirm').addEventListener('click', async ()=>{
+    const price = Number(document.getElementById('pa-price').value) || currentPrice;
+    const qtyInput = document.getElementById('pa-qty');
+    const qty = qtyInput ? (Number(qtyInput.value)||0) : position.qty;
+    if(mode==='add') await addToPaperPosition(positionId, qty, price);
+    if(mode==='partial') await partialExitPaperPosition(positionId, qty, price);
+    if(mode==='full') await fullExitPaperPosition(positionId, price);
+    if(mode==='reverse') await reversePaperPosition(positionId, price);
+    closeSheet();
+    navigateTo('paperTrading');
+    showToast('Position updated', 'success');
+  });
+  refreshIcons();
+}
+
+function computeOrderPreview(){
+  const meta = findSymbolMeta(orderForm.symbol);
+  const quote = MarketDataService.getQuote(orderForm.symbol);
+  const spot = quote ? quote.ltp : meta.basePrice;
+  const price = orderForm.instrumentType==='future' ? spot
+    : blackScholes(spot, orderForm.strike, orderForm.daysToExpiry, state.settings.riskFreeRatePct, state.settings.defaultIV, orderForm.optionType).price;
+  const orderValue = price*orderForm.qty*meta.lotSize;
+  const margin = computePaperPositionMargin({instrumentType:orderForm.instrumentType, side:orderForm.side, strike:orderForm.strike, avgPrice:price, qty:orderForm.qty, lotSize:meta.lotSize});
+  return {spot, price, orderValue, margin, charges:computeBrokerageAndCharges(orderValue)};
+}
+function orderPreviewHtml(p){
+  return `
+    <div class="settings-row"><div class="sr-label">Spot / LTP</div><span class="mono">${formatNum(p.spot,2)}</span></div>
+    <div class="settings-row"><div class="sr-label">Est. fill price</div><span class="mono" style="font-weight:600;">${formatMoney(p.price)}</span></div>
+    <div class="settings-row"><div class="sr-label">Order value</div><span class="mono">${formatMoney(p.orderValue)}</span></div>
+    <div class="settings-row"><div class="sr-label">Margin required</div><span class="mono" style="color:var(--accent);font-weight:600;">${formatMoney(p.margin)}</span></div>
+    <div class="settings-row"><div class="sr-label">Brokerage + charges</div><span class="mono">${formatMoney(p.charges.total)}</span></div>
+    <p class="sub" style="font-size:11px;margin-top:6px;">${lucideIcon('info')} Fill price from Black-Scholes off the simulated feed; margin/brokerage are simplified approximations, not broker-accurate figures.</p>
+  `;
+}
+function orderTicketBodyHtml(){
+  const meta = findSymbolMeta(orderForm.symbol);
+  return `
+    <div class="field"><label>Instrument</label>
+      <select data-field="symbol">${MARKET_SYMBOLS.map(s=>`<option value="${s.symbol}" ${s.symbol===orderForm.symbol?'selected':''}>${s.symbol} — ${escapeHtml(s.name)}</option>`).join('')}</select>
+    </div>
+    <div class="row-2">
+      <div class="field"><label>Instrument Type</label>
+        <select data-field="instrumentType"><option value="option" ${orderForm.instrumentType==='option'?'selected':''}>Option</option><option value="future" ${orderForm.instrumentType==='future'?'selected':''}>Future</option></select>
+      </div>
+      <div class="field"><label>Side</label>
+        <select data-field="side"><option value="long" ${orderForm.side==='long'?'selected':''}>BUY</option><option value="short" ${orderForm.side==='short'?'selected':''}>SELL</option></select>
+      </div>
+    </div>
+    ${orderForm.instrumentType==='option' ? `<div class="row-3">
+      <div class="field"><label>Option Type</label><select data-field="optionType"><option value="call" ${orderForm.optionType==='call'?'selected':''}>CALL (CE)</option><option value="put" ${orderForm.optionType==='put'?'selected':''}>PUT (PE)</option></select></div>
+      <div class="field"><label>Strike</label><input type="number" data-field="strike" data-numeric="1" value="${orderForm.strike}"></div>
+      <div class="field"><label>Days to expiry</label><input type="number" data-field="daysToExpiry" data-numeric="1" value="${orderForm.daysToExpiry}"></div>
+    </div>` : ''}
+    <div class="row-2">
+      <div class="field"><label>Qty (lots, ${meta.lotSize}/lot)</label><input type="number" data-field="qty" data-numeric="1" value="${orderForm.qty}" min="1"></div>
+      <div class="field"><label>Product</label><select data-field="productType"><option value="intraday" ${orderForm.productType==='intraday'?'selected':''}>Intraday</option><option value="positional" ${orderForm.productType==='positional'?'selected':''}>Positional</option></select></div>
+    </div>
+    <div class="divider"></div>
+    <div id="ot-preview">${orderPreviewHtml(computeOrderPreview())}</div>
+  `;
+}
+function handleOrderTicketInput(e){
+  const t = e.target;
+  if(!t.dataset.field) return;
+  const field = t.dataset.field;
+  orderForm[field] = t.dataset.numeric ? Number(t.value) : t.value;
+  if(field==='symbol' || field==='instrumentType'){
+    if(field==='symbol'){
+      const meta = findSymbolMeta(orderForm.symbol);
+      const quote = MarketDataService.getQuote(orderForm.symbol);
+      orderForm.strike = roundToStrikeStep(quote?quote.ltp:meta.basePrice, meta.strikeStep);
+    }
+    document.getElementById('sheet-body').innerHTML = orderTicketBodyHtml();
+    document.getElementById('sheet-body').addEventListener('input', handleOrderTicketInput);
+    document.getElementById('sheet-body').addEventListener('change', handleOrderTicketInput);
+    refreshIcons();
+    return;
+  }
+  const preview = document.getElementById('ot-preview');
+  if(preview) preview.innerHTML = orderPreviewHtml(computeOrderPreview());
+}
+function openPaperOrderTicket(presetSymbol){
+  const defaultSymbol = presetSymbol || MARKET_SYMBOLS[0].symbol;
+  const meta = findSymbolMeta(defaultSymbol);
+  const quote = MarketDataService.getQuote(defaultSymbol);
+  orderForm = {
+    symbol:defaultSymbol, instrumentType:'option', optionType:'call',
+    strike: roundToStrikeStep(quote?quote.ltp:meta.basePrice, meta.strikeStep),
+    daysToExpiry:7, side:'long', qty:1, productType:'intraday',
+  };
+  const bodyEl = document.createElement('div');
+  bodyEl.innerHTML = orderTicketBodyHtml();
+  const footerEl = document.createElement('div');
+  footerEl.style.display='flex'; footerEl.style.gap='10px'; footerEl.style.width='100%';
+  footerEl.innerHTML = `<button class="btn btn-ghost btn-block" id="ot-cancel">Cancel</button><button class="btn btn-primary btn-block" id="ot-place">${lucideIcon('check')} Place Order</button>`;
+  openSheet({title:'New Paper Position', bodyEl, footerEl});
+  document.getElementById('sheet-body').addEventListener('input', handleOrderTicketInput);
+  document.getElementById('sheet-body').addEventListener('change', handleOrderTicketInput);
+  document.getElementById('ot-cancel').addEventListener('click', closeSheet);
+  document.getElementById('ot-place').addEventListener('click', placePaperOrder);
+  refreshIcons();
+}
+async function placePaperOrder(){
+  const meta = findSymbolMeta(orderForm.symbol);
+  if(!meta){ showToast('Pick an instrument', 'error'); return; }
+  if(!orderForm.qty || orderForm.qty<=0){ showToast('Enter a valid quantity', 'error'); return; }
+  const preview = computeOrderPreview();
+  await openPaperPosition({
+    symbol:orderForm.symbol, instrumentType:orderForm.instrumentType,
+    optionType:orderForm.instrumentType==='option'?orderForm.optionType:null,
+    strike:orderForm.instrumentType==='option'?orderForm.strike:null,
+    daysToExpiry:orderForm.instrumentType==='option'?orderForm.daysToExpiry:null,
+    side:orderForm.side, qty:orderForm.qty, price:preview.price, productType:orderForm.productType, lotSize:meta.lotSize,
+  });
+  closeSheet();
+  navigateTo('paperTrading');
+  showToast('Position opened', 'success');
+}
+
+function renderPaperHistory(){
+  const wrap = document.getElementById('pt-history-list');
+  if(!wrap) return;
+  const sorted = [...state.paperOrders].sort((a,b)=> new Date(b.timestamp)-new Date(a.timestamp)).slice(0,40);
+  if(sorted.length===0){ wrap.innerHTML = emptyState('history','No orders yet','Your paper trading order history will appear here.'); return; }
+  wrap.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Side</th><th>Qty</th><th>Price</th><th>P&L</th></tr></thead><tbody>
+    ${sorted.map(o=>`<tr>
+      <td class="sub" style="font-size:11.5px;">${formatDate(o.timestamp,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</td>
+      <td>${escapeHtml(o.symbol)}</td>
+      <td><span class="badge badge-neutral">${escapeHtml(o.action)}</span></td>
+      <td style="font-weight:600;" class="${o.side==='buy'?'profit':'loss'}">${o.side.toUpperCase()}</td>
+      <td class="mono">${o.qty}</td>
+      <td class="mono">${formatNum(o.price,2)}</td>
+      <td class="mono ${o.realizedPnlImpact?pnlClass(o.realizedPnlImpact):''}">${o.realizedPnlImpact?formatMoney(o.realizedPnlImpact):'—'}</td>
+    </tr>`).join('')}
+  </tbody></table></div>`;
+}
+function exportPaperTradesCsv(){
+  const rows = [['Timestamp','Symbol','Action','Side','Qty','Price','Brokerage','Charges','RealizedPnL']];
+  [...state.paperOrders].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)).forEach(o=>{
+    rows.push([o.timestamp, o.symbol, o.action, o.side, o.qty, o.price, o.brokerage||0, (o.charges||0).toFixed(2), o.realizedPnlImpact?o.realizedPnlImpact.toFixed(2):'']);
+  });
+  const csv = rows.map(r=>r.map(c=>'"'+String(c).replace(/"/g,'""')+'"').join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download='algopilot-paper-tradebook-'+todayISO()+'.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Tradebook exported', 'success');
+}
+let paperEquityChartInstance = null;
+function drawPaperEquityChart(curve){
+  const canvas = document.getElementById('pt-equity-chart');
+  if(!canvas || typeof Chart==='undefined') return;
+  if(paperEquityChartInstance){ paperEquityChartInstance.destroy(); paperEquityChartInstance=null; }
+  paperEquityChartInstance = new Chart(canvas.getContext('2d'), {
+    type:'line',
+    data:{labels:curve.map(c=>formatDate(c.date,{day:'numeric',month:'short'})), datasets:[{
+      data:curve.map(c=>c.equity), borderColor:'#5b8def', borderWidth:2, pointRadius:0, fill:true,
+      backgroundColor:(ctx)=>{ const g=ctx.chart.ctx.createLinearGradient(0,0,0,180); g.addColorStop(0,'rgba(91,141,239,0.22)'); g.addColorStop(1,'rgba(91,141,239,0)'); return g; }
+    }]},
+    options:{responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:(c)=>formatMoney(c.parsed.y)}}},
+      scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false}},
+        y:{ticks:{color:'#5a6275',font:{size:9},callback:(v)=>formatMoney(v)},grid:{color:'rgba(255,255,255,0.06)'}}}
+    }
+  });
+}
+function confirmResetPaperAccount(){
+  showConfirm({title:'Reset paper account?', message:'This permanently deletes all paper positions and order history, and restores your virtual capital. This cannot be undone.', okLabel:'Reset', onConfirm: async ()=>{
+    await resetPaperAccount();
+    navigateTo('paperTrading');
+    showToast('Paper account reset', 'success');
+  }});
+}
+
+function renderPaperTrading(container){
+  const m = computePaperTradingMetrics();
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Paper Trading</h1><p class="sub">Virtual execution against a <span class="badge badge-warn">${lucideIcon('radio')} Simulated Feed</span></p></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="pt-reset-account">${lucideIcon('refresh-ccw')} Reset Account</button>
+        <button class="btn btn-primary" id="pt-new-position">${lucideIcon('plus')} New Position</button>
+      </div>
+    </div>
+    ${paperKpiGridHtml(m)}
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Live Quotes</span><span class="badge badge-warn">${lucideIcon('radio')} Simulated · refreshes every 1.5s</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>LTP</th><th>Chg%</th><th>High</th><th>Low</th><th></th></tr></thead><tbody id="pt-ticker-body"></tbody></table></div>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Open Positions (${m.openCount})</span>${lucideIcon('layers')}</div>
+      <div id="pt-positions-list"></div>
+    </div>
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card">
+        <div class="card-title"><span>Equity Curve</span>${lucideIcon('line-chart')}</div>
+        ${m.curve.length<2 ? emptyState('line-chart','Not enough history yet','Close a few positions to see your equity curve.') : `<div style="height:180px;"><canvas id="pt-equity-chart"></canvas></div>`}
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Performance</span>${lucideIcon('bar-chart-3')}</div>
+        <div class="settings-row"><div class="sr-label">Win rate</div><span class="mono">${formatPct(m.winRate,1)}</span></div>
+        <div class="settings-row"><div class="sr-label">Profit factor</div><span class="mono">${m.profitFactor===Infinity?'∞':formatNum(m.profitFactor,2)}</span></div>
+        <div class="settings-row"><div class="sr-label">Expectancy</div><span class="mono">${formatMoney(m.expectancy)}</span></div>
+        <div class="settings-row"><div class="sr-label">Reward:Risk</div><span class="mono">${formatNum(m.rrRatio,2)}</span></div>
+        <div class="settings-row"><div class="sr-label">Max consecutive losses</div><span class="mono">${m.maxConsecutiveLosses}</span></div>
+        <div class="settings-row"><div class="sr-label">Sharpe ratio</div><span class="mono">${formatNum(m.sharpe,2)}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Trade History (${state.paperOrders.length} orders)</span><button class="btn btn-ghost btn-sm" id="pt-export-csv">${lucideIcon('download')} Export CSV</button></div>
+      <div id="pt-history-list"></div>
+    </div>
+  `;
+  renderPaperTicker();
+  renderPaperPositions();
+  renderPaperHistory();
+  if(m.curve.length>=2) drawPaperEquityChart(m.curve);
+
+  document.getElementById('pt-new-position').addEventListener('click', ()=>openPaperOrderTicket());
+  document.getElementById('pt-reset-account').addEventListener('click', confirmResetPaperAccount);
+  document.getElementById('pt-export-csv').addEventListener('click', exportPaperTradesCsv);
+
+  if(paperTickUnsubscribe){ paperTickUnsubscribe(); paperTickUnsubscribe=null; }
+  paperTickUnsubscribe = MarketDataService.onTick(()=>{
+    if(state.currentView!=='paperTrading'){ if(paperTickUnsubscribe){ paperTickUnsubscribe(); paperTickUnsubscribe=null; } return; }
+    renderPaperTicker();
+    renderPaperPositions();
+    updatePaperKpisInPlace();
+  });
+  refreshIcons();
+}
+VIEW_RENDERERS.paperTrading = renderPaperTrading;
+
+/* ============================================================
+   PART 11 — PWA INSTALLATION
+   ============================================================ */
+let deferredInstallPrompt = null;
+
+function isIosDevice(){
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+}
+function isStandaloneDisplay(){
+  const mq = typeof window.matchMedia === 'function' ? window.matchMedia('(display-mode: standalone)').matches : false;
+  return mq || window.navigator.standalone === true;
+}
+function showInstallButton(){
+  const btn = document.getElementById('install-app-btn');
+  if(btn) btn.style.display = 'inline-flex';
+}
+function hideInstallButton(){
+  const btn = document.getElementById('install-app-btn');
+  if(btn) btn.style.display = 'none';
+}
+
+function registerServiceWorker(){
+  if(!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('./sw.js').catch(()=>{
+    // Expected to fail over file:// or when sw.js isn't served alongside the page —
+    // the app works fine without it, just without offline caching / install prompts.
+  });
+}
+
+function wireInstallFlow(){
+  if(isStandaloneDisplay()) return; // already running as an installed app
+
+  window.addEventListener('beforeinstallprompt', (e)=>{
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    showInstallButton();
+  });
+  window.addEventListener('appinstalled', ()=>{
+    deferredInstallPrompt = null;
+    hideInstallButton();
+    showToast('AlgoPilot installed', 'success');
+  });
+
+  const btn = document.getElementById('install-app-btn');
+  if(!btn) return;
+  btn.addEventListener('click', async ()=>{
+    if(deferredInstallPrompt){
+      deferredInstallPrompt.prompt();
+      const choice = await deferredInstallPrompt.userChoice;
+      if(choice && choice.outcome==='accepted') showToast('Installing AlgoPilot…', 'success');
+      deferredInstallPrompt = null;
+      hideInstallButton();
+      return;
+    }
+    if(isIosDevice()){
+      showConfirm({
+        title:'Add to Home Screen',
+        message:"iOS doesn't support installing apps from a prompt — tap the Share icon in Safari's toolbar, then choose \"Add to Home Screen\".",
+        okLabel:'Got it', danger:false,
+        onConfirm:()=>{},
+      });
+    }
+  });
+
+  // iOS has no beforeinstallprompt event at all — surface the button proactively there
+  // so the manual-instructions path above is reachable.
+  if(isIosDevice()) showInstallButton();
+}
 
 </script>
 </body>
