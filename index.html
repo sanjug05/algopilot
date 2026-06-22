@@ -703,8 +703,8 @@ const LOCKED_COPY = {
 
 // ---------- INDEXEDDB LAYER ----------
 const DB_NAME = 'algopilot_db';
-const DB_VERSION = 2;
-const STORES = ['strategies','journal','backups','checklist','watchlist','paperPositions','paperOrders'];
+const DB_VERSION = 3;
+const STORES = ['strategies','journal','backups','checklist','watchlist','paperPositions','paperOrders','bsCalculations','optionChainSnapshots','volatilityObservations'];
 let dbInstance = null;
 
 function openDatabase(){
@@ -804,6 +804,9 @@ const state = {
   checklistLog:loadChecklistLog(),
   paperPositions:[],
   paperOrders:[],
+  bsCalculations:[],
+  optionChainSnapshots:[],
+  volatilityObservations:[],
   ready:false,
 };
 
@@ -1162,6 +1165,9 @@ async function reloadAllData(){
   state.checklist = await dbGetAll('checklist');
   state.paperPositions = await dbGetAll('paperPositions');
   state.paperOrders = await dbGetAll('paperOrders');
+  state.bsCalculations = await dbGetAll('bsCalculations');
+  state.optionChainSnapshots = await dbGetAll('optionChainSnapshots');
+  state.volatilityObservations = await dbGetAll('volatilityObservations');
   updateEquityPulse();
 }
 
@@ -2773,20 +2779,27 @@ function blackScholes(S, K, daysToExpiry, ratePct, ivPct, optionType){
   const r = (ratePct||0)/100, sigma = Math.max((ivPct||1)/100, 0.01);
   const d1 = (Math.log(S/K) + (r + sigma*sigma/2)*T) / (sigma*Math.sqrt(T));
   const d2 = d1 - sigma*Math.sqrt(T);
-  let price, delta;
+  let price, delta, rho, probITM;
   if(optionType==='call'){
     price = S*normCdf(d1) - K*Math.exp(-r*T)*normCdf(d2);
     delta = normCdf(d1);
+    rho = K*T*Math.exp(-r*T)*normCdf(d2)/100;
+    probITM = normCdf(d2);
   }else{
     price = K*Math.exp(-r*T)*normCdf(-d2) - S*normCdf(-d1);
     delta = normCdf(d1)-1;
+    rho = -K*T*Math.exp(-r*T)*normCdf(-d2)/100;
+    probITM = normCdf(-d2);
   }
   const gamma = normPdf(d1)/(S*sigma*Math.sqrt(T));
   const vega = S*normPdf(d1)*Math.sqrt(T)/100;
   const theta = optionType==='call'
     ? (-S*normPdf(d1)*sigma/(2*Math.sqrt(T)) - r*K*Math.exp(-r*T)*normCdf(d2))/365
     : (-S*normPdf(d1)*sigma/(2*Math.sqrt(T)) + r*K*Math.exp(-r*T)*normCdf(-d2))/365;
-  return {price:Math.max(price,0.05), delta, gamma, theta, vega};
+  const finalPrice = Math.max(price,0.05);
+  const expectedMove = S*sigma*Math.sqrt(T);
+  const breakeven = optionType==='call' ? K+finalPrice : K-finalPrice;
+  return {price:finalPrice, delta, gamma, theta, vega, rho, probITM, probOTM:1-probITM, expectedMove, breakeven, d1, d2};
 }
 
 // ---------- SIMULATED ADAPTER (the only one that actually produces ticks today) ----------
@@ -3494,6 +3507,753 @@ function wireInstallFlow(){
   // so the manual-instructions path above is reachable.
   if(isIosDevice()) showInstallButton();
 }
+
+/* ============================================================
+   PART 12 — WATCHLIST
+   ============================================================ */
+let watchlistFilters = {search:'', category:''};
+let watchlistFormState = null;
+
+function watchlistRiskReward(item, currentPrice){
+  if(item.targetPrice==null || item.stopPrice==null || currentPrice==null) return null;
+  const reward = Math.abs(item.targetPrice - currentPrice);
+  const risk = Math.abs(currentPrice - item.stopPrice);
+  return risk>0 ? reward/risk : null;
+}
+function watchlistCurrentPrice(item){
+  const quote = MarketDataService.getQuote(item.symbol);
+  return quote ? quote.ltp : (item.priceAtAdd!=null ? item.priceAtAdd : null);
+}
+function getWatchlistCategories(){
+  const set = new Set(state.watchlist.map(w=>w.category).filter(Boolean));
+  return [...set].sort();
+}
+function filteredWatchlist(){
+  const q = watchlistFilters.search.trim().toLowerCase();
+  return state.watchlist.filter(item=>{
+    if(watchlistFilters.category && item.category!==watchlistFilters.category) return false;
+    if(!q) return true;
+    return (item.symbol||'').toLowerCase().includes(q) || (item.name||'').toLowerCase().includes(q) || (item.notes||'').toLowerCase().includes(q);
+  });
+}
+function watchlistRowHtml(item){
+  const current = watchlistCurrentPrice(item);
+  const isLive = !!MarketDataService.getQuote(item.symbol);
+  const rr = watchlistRiskReward(item, current);
+  const driftPct = (current!=null && item.priceAtAdd) ? ((current-item.priceAtAdd)/item.priceAtAdd)*100 : null;
+  return `<div class="card" style="margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px;">
+      <div style="min-width:0;">
+        <div style="font-weight:600;font-size:14.5px;">${escapeHtml(item.symbol)} ${item.name?('· '+escapeHtml(item.name)):''}</div>
+        <div class="sub" style="font-size:11.5px;margin-top:2px;">${item.category?('<span class="badge badge-neutral" style="margin-right:6px;">'+escapeHtml(item.category)+'</span>'):''}Added ${formatDate(item.addedAt)}${isLive?' · <span style="color:var(--accent-2)">live</span>':''}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        ${findSymbolMeta(item.symbol) ? `<button class="icon-btn" style="width:30px;height:30px;" data-action="watch-trade" data-id="${item.id}">${lucideIcon('play')}</button>` : ''}
+        <button class="icon-btn" style="width:30px;height:30px;" data-action="watch-edit" data-id="${item.id}">${lucideIcon('pencil')}</button>
+        <button class="icon-btn" style="width:30px;height:30px;" data-action="watch-delete" data-id="${item.id}">${lucideIcon('trash-2')}</button>
+      </div>
+    </div>
+    <div class="row-3" style="margin-bottom:${item.notes?'10px':'0'};">
+      <div><div class="kpi-label" style="font-size:10px;">Current</div><div class="mono" style="font-weight:600;">${current!=null?formatNum(current,2):'—'}</div>${driftPct!=null?`<div class="kpi-sub ${pnlClass(driftPct)}">${driftPct>=0?'+':''}${formatNum(driftPct,1)}% since added</div>`:''}</div>
+      <div><div class="kpi-label" style="font-size:10px;">Target / Stop</div><div class="mono" style="font-size:12.5px;">${item.targetPrice!=null?formatNum(item.targetPrice,2):'—'} / ${item.stopPrice!=null?formatNum(item.stopPrice,2):'—'}</div></div>
+      <div><div class="kpi-label" style="font-size:10px;">Risk:Reward</div><div class="mono" style="font-weight:600;">${rr!=null?('1:'+formatNum(rr,2)):'—'}</div></div>
+    </div>
+    ${item.notes ? `<p class="sub" style="font-size:12.5px;">${escapeHtml(item.notes)}</p>` : ''}
+  </div>`;
+}
+function renderWatchlist(container){
+  const list = filteredWatchlist();
+  const categories = getWatchlistCategories();
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Watchlist</h1><p class="sub">Track instruments you're watching, with target/stop and risk:reward</p></div>
+      <button class="btn btn-primary" id="watch-new-btn">${lucideIcon('plus')} New Item</button>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="row-2">
+        <div class="field" style="margin-bottom:0;"><input type="text" id="watch-search" placeholder="Search symbol, name or notes…" value="${escapeHtml(watchlistFilters.search)}"></div>
+        <div class="field" style="margin-bottom:0;"><select id="watch-category-filter">
+          <option value="">All categories</option>
+          ${categories.map(c=>`<option value="${escapeHtml(c)}" ${watchlistFilters.category===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
+        </select></div>
+      </div>
+    </div>
+    <div id="watchlist-list">${list.length===0 ? emptyState('star', state.watchlist.length===0?'Your watchlist is empty':'No items match your filters', state.watchlist.length===0?'Add an instrument you want to keep an eye on.':'Try a different search or category.') : list.map(watchlistRowHtml).join('')}</div>
+  `;
+  document.getElementById('watch-new-btn').addEventListener('click', ()=>openWatchlistForm(null));
+  document.getElementById('watch-search').addEventListener('input', (e)=>{ watchlistFilters.search=e.target.value; renderWatchlist(container); });
+  document.getElementById('watch-category-filter').addEventListener('change', (e)=>{ watchlistFilters.category=e.target.value; renderWatchlist(container); });
+  document.getElementById('watchlist-list').addEventListener('click', (e)=>{
+    const btn = e.target.closest('[data-action]');
+    if(!btn) return;
+    const item = state.watchlist.find(w=>w.id===btn.dataset.id);
+    if(!item) return;
+    if(btn.dataset.action==='watch-edit') openWatchlistForm(item);
+    if(btn.dataset.action==='watch-delete') confirmDeleteWatchlistItem(item.id);
+    if(btn.dataset.action==='watch-trade'){ navigateTo('paperTrading'); setTimeout(()=>openPaperOrderTicket(item.symbol), 60); }
+  });
+  refreshIcons();
+}
+function watchlistFormBodyHtml(){
+  const s = watchlistFormState;
+  return `
+    <div class="row-2">
+      <div class="field"><label>Symbol</label><input type="text" id="wf-symbol" value="${escapeHtml(s.symbol)}" placeholder="e.g. NIFTY or a custom ticker" style="text-transform:uppercase;"></div>
+      <div class="field"><label>Display name (optional)</label><input type="text" id="wf-name" value="${escapeHtml(s.name)}"></div>
+    </div>
+    <div class="field"><label>Category / tag</label><input type="text" id="wf-category" value="${escapeHtml(s.category)}" placeholder="e.g. Breakout, Earnings, Long-term"></div>
+    <div class="row-2">
+      <div class="field"><label>Target price</label><input type="number" id="wf-target" value="${s.targetPrice!=null?s.targetPrice:''}"></div>
+      <div class="field"><label>Stop price</label><input type="number" id="wf-stop" value="${s.stopPrice!=null?s.stopPrice:''}"></div>
+    </div>
+    <div class="field"><label>Notes</label><textarea id="wf-notes" rows="3">${escapeHtml(s.notes)}</textarea></div>
+  `;
+}
+function openWatchlistForm(existing){
+  watchlistFormState = existing ? Object.assign({}, existing) : {id:uid(), symbol:'', name:'', category:'', targetPrice:null, stopPrice:null, notes:'', addedAt:new Date().toISOString(), priceAtAdd:null};
+  const bodyEl = document.createElement('div');
+  bodyEl.innerHTML = watchlistFormBodyHtml();
+  const footerEl = document.createElement('div');
+  footerEl.style.display='flex'; footerEl.style.gap='10px'; footerEl.style.width='100%';
+  footerEl.innerHTML = `<button class="btn btn-ghost btn-block" id="wf-cancel">Cancel</button><button class="btn btn-primary btn-block" id="wf-save">${lucideIcon('check')} Save</button>`;
+  openSheet({title: existing?'Edit watchlist item':'New watchlist item', bodyEl, footerEl});
+  document.getElementById('wf-cancel').addEventListener('click', closeSheet);
+  document.getElementById('wf-save').addEventListener('click', saveWatchlistItem);
+  refreshIcons();
+}
+async function saveWatchlistItem(){
+  const symbol = document.getElementById('wf-symbol').value.trim().toUpperCase();
+  if(!symbol){ showToast('Enter a symbol', 'error'); return; }
+  const item = Object.assign({}, watchlistFormState, {
+    symbol,
+    name: document.getElementById('wf-name').value.trim(),
+    category: document.getElementById('wf-category').value.trim(),
+    targetPrice: document.getElementById('wf-target').value ? Number(document.getElementById('wf-target').value) : null,
+    stopPrice: document.getElementById('wf-stop').value ? Number(document.getElementById('wf-stop').value) : null,
+    notes: document.getElementById('wf-notes').value.trim(),
+  });
+  if(item.priceAtAdd==null){
+    const quote = MarketDataService.getQuote(symbol);
+    item.priceAtAdd = quote ? quote.ltp : null;
+  }
+  await dbPut('watchlist', item);
+  const idx = state.watchlist.findIndex(w=>w.id===item.id);
+  if(idx>-1) state.watchlist[idx]=item; else state.watchlist.push(item);
+  closeSheet();
+  navigateTo('watchlist');
+  showToast('Watchlist saved', 'success');
+}
+function confirmDeleteWatchlistItem(id){
+  showConfirm({title:'Remove from watchlist?', message:'This item will be permanently removed.', okLabel:'Remove', onConfirm: async ()=>{
+    await dbDelete('watchlist', id);
+    state.watchlist = state.watchlist.filter(w=>w.id!==id);
+    navigateTo('watchlist');
+    showToast('Removed from watchlist', 'success');
+  }});
+}
+VIEW_RENDERERS.watchlist = renderWatchlist;
+
+/* ============================================================
+   PART 13 — GREEKS CALCULATOR (Black-Scholes + Probability Engine)
+   ============================================================ */
+let bsCalcForm = null;
+let bsGreeksChartInstance = null;
+let bsThetaChartInstance = null;
+let bsActiveGreek = 'delta';
+
+function bsDefaultForm(){
+  const sym = MARKET_SYMBOLS[0];
+  const quote = MarketDataService.getQuote(sym.symbol);
+  return {spot: quote?quote.ltp:sym.basePrice, strike: roundToStrikeStep(quote?quote.ltp:sym.basePrice, sym.strikeStep),
+    iv: state.settings.defaultIV, dte:7, rate: state.settings.riskFreeRatePct, optionType:'call'};
+}
+function bsResultsGridHtml(r){
+  return `<div class="kpi-grid">
+    ${kpiCard('Premium', formatMoney(r.price), '', 'circle-dollar-sign')}
+    ${kpiCard('Delta', formatNum(r.delta,4), '', 'gauge')}
+    ${kpiCard('Gamma', formatNum(r.gamma,5), '', 'activity')}
+    ${kpiCard('Theta / day', formatMoney(r.theta), 'loss', 'trending-down')}
+    ${kpiCard('Vega', formatNum(r.vega,3), '', 'waves')}
+    ${kpiCard('Rho', formatNum(r.rho,3), '', 'percent')}
+    ${kpiCard('Breakeven', formatNum(r.breakeven,2), '', 'flag')}
+    ${kpiCard('Expected Move (1σ)', '±'+formatNum(r.expectedMove,1), '', 'arrows-up-down')}
+    ${kpiCard('Probability ITM', formatPct(r.probITM*100,1), '', 'target')}
+  </div>`;
+}
+function bsRecomputeAndRender(){
+  const f = bsCalcForm;
+  const r = blackScholes(f.spot, f.strike, f.dte, f.rate, f.iv, f.optionType);
+  const out = document.getElementById('bs-results');
+  if(out) out.innerHTML = bsResultsGridHtml(r);
+  drawBsGreeksChart();
+  drawBsThetaChart();
+  return r;
+}
+function drawBsGreeksChart(){
+  const canvas = document.getElementById('bs-greeks-chart');
+  if(!canvas || typeof Chart==='undefined') return;
+  if(bsGreeksChartInstance){ bsGreeksChartInstance.destroy(); bsGreeksChartInstance=null; }
+  const f = bsCalcForm;
+  const points = [];
+  for(let i=0;i<=40;i++){
+    const K = f.spot*0.7 + (f.spot*0.6)*(i/40);
+    const r = blackScholes(f.spot, K, f.dte, f.rate, f.iv, f.optionType);
+    points.push({K, v:r[bsActiveGreek]});
+  }
+  bsGreeksChartInstance = new Chart(canvas.getContext('2d'), {
+    type:'line',
+    data:{labels:points.map(p=>formatNum(p.K,0)), datasets:[{
+      data:points.map(p=>p.v), borderColor:'#22d3ee', borderWidth:2, pointRadius:0, fill:true,
+      backgroundColor:(ctx)=>{ const g=ctx.chart.ctx.createLinearGradient(0,0,0,180); g.addColorStop(0,'rgba(34,211,238,0.22)'); g.addColorStop(1,'rgba(34,211,238,0)'); return g; }
+    }]},
+    options:{responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:(c)=>bsActiveGreek+': '+formatNum(c.parsed.y,4)}}},
+      scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false},title:{display:true,text:'Strike',color:'#5a6275',font:{size:10}}},
+        y:{ticks:{color:'#5a6275',font:{size:9}},grid:{color:'rgba(255,255,255,0.06)'}}}
+    }
+  });
+}
+function drawBsThetaChart(){
+  const canvas = document.getElementById('bs-theta-chart');
+  if(!canvas || typeof Chart==='undefined') return;
+  if(bsThetaChartInstance){ bsThetaChartInstance.destroy(); bsThetaChartInstance=null; }
+  const f = bsCalcForm;
+  const maxDte = Math.max(f.dte, 14);
+  const points = [];
+  for(let d=maxDte; d>=0.5; d-=Math.max(0.5,maxDte/30)){
+    const r = blackScholes(f.spot, f.strike, d, f.rate, f.iv, f.optionType);
+    points.push({dte:d, price:r.price});
+  }
+  bsThetaChartInstance = new Chart(canvas.getContext('2d'), {
+    type:'line',
+    data:{labels:points.map(p=>formatNum(p.dte,1)), datasets:[{
+      data:points.map(p=>p.price), borderColor:'#f87171', borderWidth:2, pointRadius:0, fill:true,
+      backgroundColor:(ctx)=>{ const g=ctx.chart.ctx.createLinearGradient(0,0,0,180); g.addColorStop(0,'rgba(248,113,113,0.2)'); g.addColorStop(1,'rgba(248,113,113,0)'); return g; }
+    }]},
+    options:{responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:(c)=>formatMoney(c.parsed.y)}}},
+      scales:{x:{reverse:true, ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false},title:{display:true,text:'Days to expiry',color:'#5a6275',font:{size:10}}},
+        y:{ticks:{color:'#5a6275',font:{size:9}},grid:{color:'rgba(255,255,255,0.06)'}}}
+    }
+  });
+}
+function bsFormBodyHtml(){
+  const f = bsCalcForm;
+  return `
+    <div class="row-2">
+      <div class="field"><label>Symbol</label><select id="bs-symbol-pick">
+        <option value="">Custom spot</option>
+        ${MARKET_SYMBOLS.map(s=>`<option value="${s.symbol}">${s.symbol}</option>`).join('')}
+      </select></div>
+      <div class="field"><label>Option Type</label><select id="bs-optiontype">
+        <option value="call" ${f.optionType==='call'?'selected':''}>CALL (CE)</option>
+        <option value="put" ${f.optionType==='put'?'selected':''}>PUT (PE)</option>
+      </select></div>
+    </div>
+    <div class="row-3">
+      <div class="field"><label>Spot</label><input type="number" id="bs-spot" value="${f.spot}"></div>
+      <div class="field"><label>Strike</label><input type="number" id="bs-strike" value="${f.strike}"></div>
+      <div class="field"><label>DTE</label><input type="number" id="bs-dte" value="${f.dte}"></div>
+    </div>
+    <div class="row-2">
+      <div class="field"><label>IV %</label><input type="number" step="0.5" id="bs-iv" value="${f.iv}"></div>
+      <div class="field"><label>Risk-free rate %</label><input type="number" step="0.1" id="bs-rate" value="${f.rate}"></div>
+    </div>
+  `;
+}
+function wireBsForm(){
+  document.getElementById('bs-symbol-pick').addEventListener('change', (e)=>{
+    if(!e.target.value) return;
+    const meta = findSymbolMeta(e.target.value);
+    const quote = MarketDataService.getQuote(e.target.value);
+    bsCalcForm.spot = quote?quote.ltp:meta.basePrice;
+    bsCalcForm.strike = roundToStrikeStep(bsCalcForm.spot, meta.strikeStep);
+    document.getElementById('bs-spot').value = formatNum(bsCalcForm.spot,2);
+    document.getElementById('bs-strike').value = bsCalcForm.strike;
+    bsRecomputeAndRender();
+  });
+  ['bs-spot','bs-strike','bs-dte','bs-iv','bs-rate'].forEach(id=>{
+    const field = id.replace('bs-','');
+    document.getElementById(id).addEventListener('input', (e)=>{ bsCalcForm[field] = Number(e.target.value)||0; bsRecomputeAndRender(); });
+  });
+  document.getElementById('bs-optiontype').addEventListener('change', (e)=>{ bsCalcForm.optionType=e.target.value; bsRecomputeAndRender(); });
+  document.querySelectorAll('[data-greek]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      bsActiveGreek = btn.dataset.greek;
+      document.querySelectorAll('[data-greek]').forEach(b=>b.classList.toggle('active', b===btn));
+      drawBsGreeksChart();
+    });
+  });
+}
+async function saveBsCalculation(){
+  const r = blackScholes(bsCalcForm.spot, bsCalcForm.strike, bsCalcForm.dte, bsCalcForm.rate, bsCalcForm.iv, bsCalcForm.optionType);
+  const calc = {id:uid(), timestamp:new Date().toISOString(), spot:bsCalcForm.spot, strike:bsCalcForm.strike,
+    iv:bsCalcForm.iv, dte:bsCalcForm.dte, rate:bsCalcForm.rate, optionType:bsCalcForm.optionType, results:r};
+  await dbPut('bsCalculations', calc);
+  state.bsCalculations.push(calc);
+  renderBsHistory();
+  showToast('Calculation saved', 'success');
+}
+function renderBsHistory(){
+  const wrap = document.getElementById('bs-history-list');
+  if(!wrap) return;
+  const sorted = [...state.bsCalculations].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).slice(0,20);
+  if(sorted.length===0){ wrap.innerHTML = emptyState('history','No saved calculations yet','Save a calculation above to keep a record of it.'); return; }
+  wrap.innerHTML = sorted.map(c=>`<div class="list-row">
+    <div style="flex:1;">
+      <div style="font-size:13px;font-weight:600;">${formatNum(c.spot,1)} spot · ${c.strike} ${c.optionType==='call'?'CE':'PE'} · ${c.dte}DTE · ${c.iv}% IV</div>
+      <div class="sub" style="font-size:11px;">Premium ${formatMoney(c.results.price)} · Δ${formatNum(c.results.delta,3)} · ${formatDate(c.timestamp)}</div>
+    </div>
+    <button class="icon-btn" style="width:28px;height:28px;" data-action="bs-load" data-id="${c.id}">${lucideIcon('upload')}</button>
+    <button class="icon-btn" style="width:28px;height:28px;" data-action="bs-delete" data-id="${c.id}">${lucideIcon('trash-2')}</button>
+  </div>`).join('');
+  wrap.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const calc = state.bsCalculations.find(c=>c.id===btn.dataset.id);
+      if(!calc) return;
+      if(btn.dataset.action==='bs-load'){
+        bsCalcForm = {spot:calc.spot, strike:calc.strike, iv:calc.iv, dte:calc.dte, rate:calc.rate, optionType:calc.optionType};
+        navigateTo('greeksCalculator');
+        showToast('Calculation loaded', 'success');
+      }
+      if(btn.dataset.action==='bs-delete'){
+        await dbDelete('bsCalculations', calc.id);
+        state.bsCalculations = state.bsCalculations.filter(c=>c.id!==calc.id);
+        renderBsHistory();
+      }
+    });
+  });
+  refreshIcons();
+}
+function renderGreeksCalculator(container){
+  if(!bsCalcForm) bsCalcForm = bsDefaultForm();
+  const r = blackScholes(bsCalcForm.spot, bsCalcForm.strike, bsCalcForm.dte, bsCalcForm.rate, bsCalcForm.iv, bsCalcForm.optionType);
+  container.innerHTML = `
+    <div class="view-head">
+      <h1>Greeks Calculator</h1>
+      <p class="sub">Black-Scholes pricing, Greeks and probability — computed live from your inputs</p>
+    </div>
+    <div class="card" style="margin-bottom:16px;">${bsFormBodyHtml()}</div>
+    <div id="bs-results" style="margin-bottom:16px;">${bsResultsGridHtml(r)}</div>
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card">
+        <div class="card-title"><span>Greeks vs. Strike</span></div>
+        <div class="tabs" style="margin-bottom:12px;">
+          ${['delta','gamma','theta','vega'].map(g=>`<button class="tab-btn${g===bsActiveGreek?' active':''}" data-greek="${g}">${g[0].toUpperCase()+g.slice(1)}</button>`).join('')}
+        </div>
+        <div style="height:180px;"><canvas id="bs-greeks-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Theta Decay (price vs. days to expiry)</span></div>
+        <div style="height:180px;margin-top:8px;"><canvas id="bs-theta-chart"></canvas></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Calculation History</span><button class="btn btn-ghost btn-sm" id="bs-save-btn">${lucideIcon('save')} Save current</button></div>
+      <div id="bs-history-list"></div>
+    </div>
+  `;
+  wireBsForm();
+  document.getElementById('bs-save-btn').addEventListener('click', saveBsCalculation);
+  renderBsHistory();
+  drawBsGreeksChart();
+  drawBsThetaChart();
+  refreshIcons();
+}
+VIEW_RENDERERS.greeksCalculator = renderGreeksCalculator;
+
+/* ============================================================
+   PART 14 — OPTION CHAIN ENGINE
+   ============================================================ */
+let chainDraft = null;
+
+function chainNewDraft(symbol){
+  const meta = findSymbolMeta(symbol) || MARKET_SYMBOLS[0];
+  const quote = MarketDataService.getQuote(meta.symbol);
+  const spot = quote ? quote.ltp : meta.basePrice;
+  const atm = roundToStrikeStep(spot, meta.strikeStep);
+  const rows = [];
+  for(let i=-3;i<=3;i++){
+    rows.push({id:uid(), strike: atm + i*meta.strikeStep, ceOI:0, ceVolume:0, cePremium:0, ceIV:0, peOI:0, peVolume:0, pePremium:0, peIV:0});
+  }
+  return {symbol:meta.symbol, expiryLabel:'', underlyingPrice:spot, rows};
+}
+function computeChainAnalytics(rows){
+  const totalCeOI = rows.reduce((s,r)=>s+(Number(r.ceOI)||0),0);
+  const totalPeOI = rows.reduce((s,r)=>s+(Number(r.peOI)||0),0);
+  const pcr = totalCeOI>0 ? totalPeOI/totalCeOI : 0;
+  let maxPainStrike=null, minPain=Infinity;
+  rows.forEach(candidate=>{
+    const S = candidate.strike;
+    let pain = 0;
+    rows.forEach(row=>{
+      pain += (Number(row.ceOI)||0)*Math.max(0, S-row.strike);
+      pain += (Number(row.peOI)||0)*Math.max(0, row.strike-S);
+    });
+    if(pain<minPain){ minPain=pain; maxPainStrike=S; }
+  });
+  const support = rows.length ? rows.reduce((max,r)=> (Number(r.peOI)||0)>(Number(max.peOI)||0)?r:max) : null;
+  const resistance = rows.length ? rows.reduce((max,r)=> (Number(r.ceOI)||0)>(Number(max.ceOI)||0)?r:max) : null;
+  return {pcr, maxPainStrike, totalCeOI, totalPeOI, supportStrike: support?support.strike:null, resistanceStrike: resistance?resistance.strike:null};
+}
+function classifyBuildup(curOI, curPremium, prevOI, prevPremium){
+  if(prevOI==null || prevPremium==null) return null;
+  const oiUp = curOI > prevOI, premUp = curPremium > prevPremium;
+  if(oiUp && premUp) return {label:'Long Buildup', cls:'profit'};
+  if(oiUp && !premUp) return {label:'Short Buildup', cls:'loss'};
+  if(!oiUp && !premUp) return {label:'Long Unwinding', cls:'warn'};
+  if(!oiUp && premUp) return {label:'Short Covering', cls:'accent'};
+  return null;
+}
+function findPreviousChainSnapshot(symbol, excludeId){
+  return [...state.optionChainSnapshots]
+    .filter(s=>s.symbol===symbol && s.id!==excludeId)
+    .sort((a,b)=> new Date(b.capturedAt)-new Date(a.capturedAt))[0] || null;
+}
+function moneynessBadge(strike, spot, side){
+  const isCall = side==='ce';
+  const itm = isCall ? strike < spot : strike > spot;
+  const atm = Math.abs(strike-spot) < (spot*0.0025);
+  if(atm) return '<span class="badge badge-accent">ATM</span>';
+  return itm ? '<span class="badge badge-profit">ITM</span>' : '<span class="badge badge-neutral">OTM</span>';
+}
+function chainRowHtml(row, prevSnapshot, spot){
+  const prevRow = prevSnapshot ? prevSnapshot.rows.find(r=>r.strike===row.strike) : null;
+  const ceBuild = prevRow ? classifyBuildup(Number(row.ceOI)||0, Number(row.cePremium)||0, Number(prevRow.ceOI)||0, Number(prevRow.cePremium)||0) : null;
+  const peBuild = prevRow ? classifyBuildup(Number(row.peOI)||0, Number(row.pePremium)||0, Number(prevRow.peOI)||0, Number(prevRow.pePremium)||0) : null;
+  return `<tr data-row-id="${row.id}">
+    <td><input type="number" class="chain-input mono" data-field="ceOI" value="${row.ceOI||''}" placeholder="OI"></td>
+    <td><input type="number" class="chain-input mono" data-field="ceVolume" value="${row.ceVolume||''}" placeholder="Vol"></td>
+    <td><input type="number" class="chain-input mono" data-field="cePremium" value="${row.cePremium||''}" placeholder="Premium"></td>
+    <td><input type="number" class="chain-input mono" data-field="ceIV" value="${row.ceIV||''}" placeholder="IV"></td>
+    <td>${ceBuild?`<span class="badge badge-${ceBuild.cls}" style="font-size:9px;">${ceBuild.label}</span>`:''}</td>
+    <td style="text-align:center;background:rgba(255,255,255,0.03);">
+      <div class="mono" style="font-weight:700;">${row.strike}</div>
+      ${moneynessBadge(row.strike, spot, 'ce')}
+      <button class="icon-btn" style="width:22px;height:22px;margin-top:4px;" data-action="chain-remove-row" data-id="${row.id}">${lucideIcon('x')}</button>
+    </td>
+    <td>${peBuild?`<span class="badge badge-${peBuild.cls}" style="font-size:9px;">${peBuild.label}</span>`:''}</td>
+    <td><input type="number" class="chain-input mono" data-field="peIV" value="${row.peIV||''}" placeholder="IV"></td>
+    <td><input type="number" class="chain-input mono" data-field="pePremium" value="${row.pePremium||''}" placeholder="Premium"></td>
+    <td><input type="number" class="chain-input mono" data-field="peVolume" value="${row.peVolume||''}" placeholder="Vol"></td>
+    <td><input type="number" class="chain-input mono" data-field="peOI" value="${row.peOI||''}" placeholder="OI"></td>
+  </tr>`;
+}
+function chainHeatmapHtml(rows){
+  const maxOI = Math.max(1, ...rows.map(r=>Math.max(Number(r.ceOI)||0, Number(r.peOI)||0)));
+  return `<div style="display:flex;flex-direction:column;gap:4px;">
+    ${rows.map(r=>{
+      const cePct = clamp(((Number(r.ceOI)||0)/maxOI)*100,0,100);
+      const pePct = clamp(((Number(r.peOI)||0)/maxOI)*100,0,100);
+      return `<div style="display:grid;grid-template-columns:1fr 70px 1fr;align-items:center;gap:8px;font-size:10.5px;">
+        <div style="display:flex;justify-content:flex-end;"><div style="height:14px;width:${cePct}%;background:linear-gradient(90deg,transparent,var(--profit));border-radius:3px;"></div></div>
+        <div class="mono" style="text-align:center;font-weight:700;">${r.strike}</div>
+        <div style="display:flex;"><div style="height:14px;width:${pePct}%;background:linear-gradient(90deg,var(--loss),transparent);border-radius:3px;"></div></div>
+      </div>`;
+    }).join('')}
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);margin-top:4px;"><span>CE OI</span><span>PE OI</span></div>
+  </div>`;
+}
+function renderChainTable(){
+  const wrap = document.getElementById('chain-table-wrap');
+  if(!wrap) return;
+  const prev = findPreviousChainSnapshot(chainDraft.symbol, null);
+  wrap.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr>
+      <th colspan="5" style="text-align:center;color:var(--profit);">CALLS (CE)</th><th></th><th colspan="5" style="text-align:center;color:var(--loss);">PUTS (PE)</th>
+    </tr>
+    <tr><th>OI</th><th>Vol</th><th>Premium</th><th>IV</th><th>Build</th><th>Strike</th><th>Build</th><th>IV</th><th>Premium</th><th>Vol</th><th>OI</th></tr></thead>
+    <tbody>${chainDraft.rows.sort((a,b)=>a.strike-b.strike).map(r=>chainRowHtml(r, prev, chainDraft.underlyingPrice)).join('')}</tbody>
+  </table></div>`;
+  wrap.querySelectorAll('.chain-input').forEach(inp=>{
+    inp.addEventListener('input', (e)=>{
+      const rowId = e.target.closest('tr').dataset.rowId;
+      const row = chainDraft.rows.find(r=>r.id===rowId);
+      if(row) row[e.target.dataset.field] = Number(e.target.value)||0;
+      renderChainAnalytics();
+    });
+  });
+  wrap.querySelectorAll('[data-action="chain-remove-row"]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      chainDraft.rows = chainDraft.rows.filter(r=>r.id!==btn.dataset.id);
+      renderChainTable();
+      renderChainAnalytics();
+    });
+  });
+  refreshIcons();
+}
+function renderChainAnalytics(){
+  const wrap = document.getElementById('chain-analytics');
+  if(!wrap) return;
+  const a = computeChainAnalytics(chainDraft.rows);
+  wrap.innerHTML = `<div class="kpi-grid">
+    ${kpiCard('PCR', formatNum(a.pcr,2), a.pcr>1?'profit':'loss', 'scale')}
+    ${kpiCard('Max Pain', a.maxPainStrike!=null?String(a.maxPainStrike):'—', '', 'crosshair')}
+    ${kpiCard('Support', a.supportStrike!=null?String(a.supportStrike):'—', '', 'arrow-down')}
+    ${kpiCard('Resistance', a.resistanceStrike!=null?String(a.resistanceStrike):'—', '', 'arrow-up')}
+  </div>`;
+  const heat = document.getElementById('chain-heatmap');
+  if(heat) heat.innerHTML = chainDraft.rows.length ? chainHeatmapHtml([...chainDraft.rows].sort((a,b)=>a.strike-b.strike)) : emptyState('bar-chart-3','No strikes yet','Add a strike row to see the OI heatmap.');
+}
+function renderChainSnapshotsList(){
+  const wrap = document.getElementById('chain-snapshots-list');
+  if(!wrap) return;
+  const list = state.optionChainSnapshots.filter(s=>s.symbol===chainDraft.symbol).sort((a,b)=>new Date(b.capturedAt)-new Date(a.capturedAt));
+  if(list.length===0){ wrap.innerHTML = emptyState('camera','No saved snapshots yet','Save a snapshot to compare OI buildup over time.'); return; }
+  wrap.innerHTML = list.map(s=>`<div class="list-row">
+    <div style="flex:1;">
+      <div style="font-size:13px;font-weight:600;">${escapeHtml(s.symbol)} ${s.expiryLabel?('· '+escapeHtml(s.expiryLabel)):''}</div>
+      <div class="sub" style="font-size:11px;">Spot ${formatNum(s.underlyingPrice,1)} · ${s.rows.length} strikes · ${formatDate(s.capturedAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</div>
+    </div>
+    <button class="icon-btn" style="width:28px;height:28px;" data-action="chain-load" data-id="${s.id}">${lucideIcon('upload')}</button>
+    <button class="icon-btn" style="width:28px;height:28px;" data-action="chain-delete" data-id="${s.id}">${lucideIcon('trash-2')}</button>
+  </div>`).join('');
+  wrap.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const snap = state.optionChainSnapshots.find(s=>s.id===btn.dataset.id);
+      if(!snap) return;
+      if(btn.dataset.action==='chain-load'){
+        chainDraft = {symbol:snap.symbol, expiryLabel:snap.expiryLabel, underlyingPrice:snap.underlyingPrice, rows:snap.rows.map(r=>Object.assign({},r))};
+        navigateTo('optionChain');
+      }
+      if(btn.dataset.action==='chain-delete'){
+        await dbDelete('optionChainSnapshots', snap.id);
+        state.optionChainSnapshots = state.optionChainSnapshots.filter(s=>s.id!==snap.id);
+        renderChainSnapshotsList();
+        showToast('Snapshot deleted', 'success');
+      }
+    });
+  });
+  refreshIcons();
+}
+async function saveChainSnapshot(){
+  if(chainDraft.rows.length===0){ showToast('Add at least one strike first', 'error'); return; }
+  const snap = {id:uid(), symbol:chainDraft.symbol, expiryLabel:chainDraft.expiryLabel, underlyingPrice:chainDraft.underlyingPrice,
+    capturedAt:new Date().toISOString(), rows:chainDraft.rows.map(r=>Object.assign({},r))};
+  await dbPut('optionChainSnapshots', snap);
+  state.optionChainSnapshots.push(snap);
+  renderChainSnapshotsList();
+  showToast('Snapshot saved', 'success');
+}
+function renderOptionChain(container){
+  if(!chainDraft) chainDraft = chainNewDraft(MARKET_SYMBOLS[0].symbol);
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Option Chain</h1><p class="sub">Manually log a chain snapshot — OI, volume, premium and IV per strike</p></div>
+      <button class="btn btn-primary btn-sm" id="chain-save-btn">${lucideIcon('camera')} Save Snapshot</button>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="row-3">
+        <div class="field"><label>Symbol</label><select id="chain-symbol">${MARKET_SYMBOLS.map(s=>`<option value="${s.symbol}" ${s.symbol===chainDraft.symbol?'selected':''}>${s.symbol}</option>`).join('')}</select></div>
+        <div class="field"><label>Expiry label</label><input type="text" id="chain-expiry" value="${escapeHtml(chainDraft.expiryLabel)}" placeholder="e.g. 26 Jun Weekly"></div>
+        <div class="field"><label>Underlying price</label><input type="number" id="chain-spot" value="${chainDraft.underlyingPrice}"></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="chain-add-row">${lucideIcon('plus')} Add strike</button>
+    </div>
+    <div id="chain-analytics" style="margin-bottom:16px;"></div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Chain</span>${lucideIcon('table')}</div>
+      <div id="chain-table-wrap">${chainDraft.rows.length===0?emptyState('table','No strikes yet','Add a strike row to start logging this chain.'):''}</div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title"><span>OI Heatmap</span>${lucideIcon('flame')}</div>
+        <div id="chain-heatmap"></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Saved Snapshots</span>${lucideIcon('history')}</div>
+        <div id="chain-snapshots-list"></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('chain-symbol').addEventListener('change', (e)=>{ chainDraft = chainNewDraft(e.target.value); navigateTo('optionChain'); });
+  document.getElementById('chain-expiry').addEventListener('input', (e)=>{ chainDraft.expiryLabel = e.target.value; });
+  document.getElementById('chain-spot').addEventListener('input', (e)=>{ chainDraft.underlyingPrice = Number(e.target.value)||0; renderChainTable(); });
+  document.getElementById('chain-add-row').addEventListener('click', ()=>{
+    const meta = findSymbolMeta(chainDraft.symbol);
+    const lastStrike = chainDraft.rows.length ? Math.max(...chainDraft.rows.map(r=>r.strike)) : chainDraft.underlyingPrice;
+    chainDraft.rows.push({id:uid(), strike: lastStrike + meta.strikeStep, ceOI:0, ceVolume:0, cePremium:0, ceIV:0, peOI:0, peVolume:0, pePremium:0, peIV:0});
+    renderChainTable();
+    renderChainAnalytics();
+  });
+  document.getElementById('chain-save-btn').addEventListener('click', saveChainSnapshot);
+  renderChainTable();
+  renderChainAnalytics();
+  renderChainSnapshotsList();
+  refreshIcons();
+}
+VIEW_RENDERERS.optionChain = renderOptionChain;
+
+/* ============================================================
+   PART 15 — VOLATILITY ANALYSIS
+   ============================================================ */
+let volSelectedSymbol = null;
+let volIvChartInstance = null;
+let volHvChartInstance = null;
+
+function volObservationsFor(symbol){
+  return state.volatilityObservations.filter(o=>o.symbol===symbol).sort((a,b)=>new Date(a.date)-new Date(b.date));
+}
+function computeHistoricalVolatility(obs){
+  if(obs.length<2) return null;
+  const returns = [];
+  for(let i=1;i<obs.length;i++){
+    if(obs[i].closePrice>0 && obs[i-1].closePrice>0) returns.push(Math.log(obs[i].closePrice/obs[i-1].closePrice));
+  }
+  if(returns.length<2) return null;
+  const mean = returns.reduce((a,b)=>a+b,0)/returns.length;
+  const variance = returns.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(returns.length-1);
+  return Math.sqrt(variance)*Math.sqrt(252)*100;
+}
+function computeIVRankPercentile(obs, currentIV){
+  const ivs = obs.map(o=>o.impliedVol).filter(v=>v!=null && v>0);
+  if(ivs.length<2 || currentIV==null) return {rank:null, percentile:null};
+  const min = Math.min(...ivs), max = Math.max(...ivs);
+  const rank = max>min ? ((currentIV-min)/(max-min))*100 : 50;
+  const below = ivs.filter(v=>v<=currentIV).length;
+  return {rank: clamp(rank,0,100), percentile: (below/ivs.length)*100};
+}
+function classifyVolRegime(ivRank){
+  if(ivRank==null) return {label:'Insufficient Data', cls:'neutral'};
+  if(ivRank<25) return {label:'Low', cls:'profit'};
+  if(ivRank<65) return {label:'Normal', cls:'accent'};
+  if(ivRank<85) return {label:'High', cls:'warn'};
+  return {label:'Extreme', cls:'loss'};
+}
+function volGaugeHtml(ivRank, regime){
+  const pos = ivRank==null ? 0 : clamp(ivRank,0,100);
+  return `<div style="margin-bottom:6px;">
+    <div style="display:flex;height:10px;border-radius:99px;overflow:hidden;">
+      <div style="flex:25;background:var(--profit);"></div>
+      <div style="flex:40;background:var(--accent);"></div>
+      <div style="flex:20;background:var(--warn);"></div>
+      <div style="flex:15;background:var(--loss);"></div>
+    </div>
+    <div style="position:relative;height:14px;">
+      <div style="position:absolute;left:${pos}%;top:0;transform:translateX(-50%);width:2px;height:14px;background:#fff;box-shadow:0 0 6px rgba(255,255,255,0.8);"></div>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-tertiary);"><span>Low</span><span>Normal</span><span>High</span><span>Extreme</span></div>`;
+}
+function volSummaryHtml(symbol){
+  const obs = volObservationsFor(symbol);
+  const latest = obs.length ? obs[obs.length-1] : null;
+  const hv = computeHistoricalVolatility(obs);
+  const ivStats = computeIVRankPercentile(obs, latest?latest.impliedVol:null);
+  const regime = classifyVolRegime(ivStats.rank);
+  const meta = findSymbolMeta(symbol);
+  const quote = MarketDataService.getQuote(symbol);
+  const spot = quote ? quote.ltp : (latest?latest.closePrice:meta.basePrice);
+  const expectedMove7d = latest && latest.impliedVol ? spot*(latest.impliedVol/100)*Math.sqrt(7/365) : null;
+  return `
+    <div class="kpi-grid">
+      ${kpiCard('Historical Volatility', hv!=null?formatPct(hv,1):'—', '', 'activity', obs.length+' observations logged')}
+      ${kpiCard('Latest IV', latest&&latest.impliedVol!=null?formatPct(latest.impliedVol,1):'—', '', 'waves')}
+      ${kpiCard('IV Rank', ivStats.rank!=null?formatPct(ivStats.rank,0):'—', '', 'gauge')}
+      ${kpiCard('IV Percentile', ivStats.percentile!=null?formatPct(ivStats.percentile,0):'—', '', 'percent')}
+      ${kpiCard('Expected Move (7D)', expectedMove7d!=null?('±'+formatNum(expectedMove7d,1)):'—', '', 'arrows-up-down')}
+      ${kpiCard('Regime', regime.label, '', 'flag', undefined, regime.cls)}
+    </div>
+    <div class="card" style="margin-top:16px;margin-bottom:16px;">
+      <div class="card-title"><span>Volatility Regime Gauge</span></div>
+      ${volGaugeHtml(ivStats.rank, regime)}
+      <p class="sub" style="font-size:11px;margin-top:10px;">Heuristic bands by IV Rank: Low &lt;25, Normal 25–65, High 65–85, Extreme &gt;85. Needs at least 2 logged IV readings to compute.</p>
+    </div>
+  `;
+}
+async function saveVolObservation(){
+  const date = document.getElementById('vol-date').value || todayISO();
+  const closePrice = Number(document.getElementById('vol-close').value)||0;
+  const impliedVol = document.getElementById('vol-iv').value ? Number(document.getElementById('vol-iv').value) : null;
+  if(!closePrice){ showToast('Enter a close price', 'error'); return; }
+  const obs = {id:uid(), symbol:volSelectedSymbol, date, closePrice, impliedVol};
+  await dbPut('volatilityObservations', obs);
+  state.volatilityObservations.push(obs);
+  navigateTo('volatilityAnalysis');
+  showToast('Observation logged', 'success');
+}
+function renderVolObservationsList(){
+  const wrap = document.getElementById('vol-obs-list');
+  if(!wrap) return;
+  const obs = [...volObservationsFor(volSelectedSymbol)].reverse();
+  if(obs.length===0){ wrap.innerHTML = emptyState('activity','No observations yet','Log a daily close price and IV reading to start tracking volatility.'); return; }
+  wrap.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Close</th><th>IV</th><th></th></tr></thead><tbody>
+    ${obs.map(o=>`<tr><td>${formatDate(o.date)}</td><td class="mono">${formatNum(o.closePrice,2)}</td><td class="mono">${o.impliedVol!=null?formatPct(o.impliedVol,1):'—'}</td>
+    <td><button class="icon-btn" style="width:26px;height:26px;" data-action="vol-delete" data-id="${o.id}">${lucideIcon('trash-2')}</button></td></tr>`).join('')}
+  </tbody></table></div>`;
+  wrap.querySelectorAll('[data-action="vol-delete"]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      await dbDelete('volatilityObservations', btn.dataset.id);
+      state.volatilityObservations = state.volatilityObservations.filter(o=>o.id!==btn.dataset.id);
+      navigateTo('volatilityAnalysis');
+    });
+  });
+  refreshIcons();
+}
+function drawVolCharts(){
+  const obs = volObservationsFor(volSelectedSymbol);
+  const ivCanvas = document.getElementById('vol-iv-chart');
+  if(volIvChartInstance){ volIvChartInstance.destroy(); volIvChartInstance=null; }
+  if(ivCanvas && typeof Chart!=='undefined' && obs.filter(o=>o.impliedVol!=null).length>=2){
+    const withIv = obs.filter(o=>o.impliedVol!=null);
+    volIvChartInstance = new Chart(ivCanvas.getContext('2d'), {
+      type:'line', data:{labels:withIv.map(o=>formatDate(o.date,{day:'numeric',month:'short'})), datasets:[{data:withIv.map(o=>o.impliedVol), borderColor:'#22d3ee', borderWidth:2, pointRadius:0, fill:false}]},
+      options:{responsive:true,maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false}}, y:{ticks:{color:'#5a6275',font:{size:9},callback:(v)=>v+'%'},grid:{color:'rgba(255,255,255,0.06)'}}}}
+    });
+  }
+  const hvCanvas = document.getElementById('vol-hv-chart');
+  if(volHvChartInstance){ volHvChartInstance.destroy(); volHvChartInstance=null; }
+  if(hvCanvas && typeof Chart!=='undefined' && obs.length>=11){
+    const rolling = [];
+    for(let i=10;i<obs.length;i++){
+      const hv = computeHistoricalVolatility(obs.slice(i-10,i+1));
+      if(hv!=null) rolling.push({date:obs[i].date, hv});
+    }
+    volHvChartInstance = new Chart(hvCanvas.getContext('2d'), {
+      type:'line', data:{labels:rolling.map(r=>formatDate(r.date,{day:'numeric',month:'short'})), datasets:[{data:rolling.map(r=>r.hv), borderColor:'#5b8def', borderWidth:2, pointRadius:0, fill:false}]},
+      options:{responsive:true,maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false}}, y:{ticks:{color:'#5a6275',font:{size:9},callback:(v)=>v+'%'},grid:{color:'rgba(255,255,255,0.06)'}}}}
+    });
+  }
+}
+function renderVolatilityAnalysis(container){
+  if(!volSelectedSymbol) volSelectedSymbol = MARKET_SYMBOLS[0].symbol;
+  const obsWithIv = volObservationsFor(volSelectedSymbol).filter(o=>o.impliedVol!=null).length;
+  const obsCount = volObservationsFor(volSelectedSymbol).length;
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Volatility Analysis</h1><p class="sub">Historical volatility, IV rank/percentile and regime — from data you log</p></div>
+      <select id="vol-symbol-pick" style="max-width:160px;">${MARKET_SYMBOLS.map(s=>`<option value="${s.symbol}" ${s.symbol===volSelectedSymbol?'selected':''}>${s.symbol}</option>`).join('')}</select>
+    </div>
+    <div id="vol-summary">${volSummaryHtml(volSelectedSymbol)}</div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Log Daily Observation</span>${lucideIcon('plus-circle')}</div>
+      <div class="row-3">
+        <div class="field"><label>Date</label><input type="date" id="vol-date" value="${todayISO()}"></div>
+        <div class="field"><label>Close price</label><input type="number" id="vol-close" placeholder="0"></div>
+        <div class="field"><label>ATM IV %</label><input type="number" id="vol-iv" placeholder="optional"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="vol-save-btn">${lucideIcon('check')} Log Observation</button>
+    </div>
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card"><div class="card-title"><span>IV History</span></div>
+        ${obsWithIv>=2 ? `<div style="height:160px;"><canvas id="vol-iv-chart"></canvas></div>` : emptyState('waves','Need 2+ IV readings','Log at least two days with an IV reading to chart this.')}
+      </div>
+      <div class="card"><div class="card-title"><span>Rolling 10-Obs Historical Volatility</span></div>
+        ${obsCount>=11 ? `<div style="height:160px;"><canvas id="vol-hv-chart"></canvas></div>` : emptyState('activity','Need 11+ observations','Log at least 11 daily closes to chart a rolling HV trend.')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Logged Observations</span></div>
+      <div id="vol-obs-list"></div>
+    </div>
+  `;
+  document.getElementById('vol-symbol-pick').addEventListener('change', (e)=>{ volSelectedSymbol = e.target.value; navigateTo('volatilityAnalysis'); });
+  document.getElementById('vol-save-btn').addEventListener('click', saveVolObservation);
+  renderVolObservationsList();
+  drawVolCharts();
+  refreshIcons();
+}
+VIEW_RENDERERS.volatilityAnalysis = renderVolatilityAnalysis;
 
 </script>
 </body>
