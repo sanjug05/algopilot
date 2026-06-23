@@ -390,6 +390,25 @@ tr:last-child td{border-bottom:none;}
 .grid-2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;}
 .grid-2-equal{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
 @media (max-width:880px){.grid-2,.grid-2-equal{grid-template-columns:1fr;}}
+@media print{
+  body{background:#fff!important;color:#111!important;}
+  #sidebar,#topbar,#mobile-nav,#sheet-overlay,#confirm-overlay,#palette-overlay,
+  .btn,.icon-btn,[id$="-btn"],[data-action]{display:none!important;}
+  #main-content{margin:0!important;padding:16px!important;max-width:100%!important;}
+  .card{background:#fff!important;border:1px solid #ddd!important;box-shadow:none!important;break-inside:avoid;}
+  .kpi-card{background:#f9f9f9!important;border:1px solid #eee!important;}
+  .kpi-value,.mono{color:#111!important;}
+  .sub{color:#555!important;}
+  .profit{color:#16a34a!important;}
+  .loss{color:#dc2626!important;}
+  h1,h2,h3{color:#111!important;}
+  canvas{max-width:100%;break-inside:avoid;}
+  .table-wrap{overflow:visible!important;}
+  table{border-collapse:collapse;width:100%;}
+  th,td{border:1px solid #ddd!important;padding:6px 10px!important;font-size:11px!important;color:#111!important;}
+  th{background:#f5f5f5!important;}
+  @page{margin:1.5cm;size:A4;}
+}
 
 .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:46px 20px;color:var(--text-tertiary);}
 .empty-state svg{width:38px;height:38px;margin-bottom:14px;opacity:0.5;}
@@ -536,6 +555,8 @@ tr:last-child td{border-bottom:none;}
 .settings-row .sr-sub{font-size:11.5px;color:var(--text-tertiary);margin-top:2px;}
 
 .disclaimer-box{font-size:11.5px;color:var(--text-tertiary);background:rgba(255,255,255,0.03);border:1px solid var(--glass-border);border-radius:12px;padding:12px 14px;line-height:1.55;}
+.spinner{width:36px;height:36px;border:3px solid rgba(255,255,255,0.1);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto;}
+@keyframes spin{to{transform:rotate(360deg);}}
 </style>
 </head>
 <body>
@@ -644,6 +665,41 @@ tr:last-child td{border-bottom:none;}
 
 <script>
 'use strict';
+
+/* ============================================================
+   APP METADATA
+   ============================================================ */
+const APP_VERSION = '1.0.0';
+const APP_BUILD_DATE = '2026-06-24';
+
+/* ============================================================
+   GLOBAL ERROR HANDLER — captures all uncaught errors and
+   unhandled promise rejections into state.errorLogs.
+   ============================================================ */
+window.onerror = function(msg, src, line, col, err){
+  if(typeof state !== 'undefined' && Array.isArray(state.errorLogs)){
+    state.errorLogs.unshift({ts:new Date().toISOString(), module:'window', message:String(msg), stack:err&&err.stack?err.stack:'', line, col});
+    state.errorLogs = state.errorLogs.slice(0,100);
+  }
+  return false; // allow default console logging too
+};
+window.onunhandledrejection = function(ev){
+  const reason = ev.reason;
+  if(typeof state !== 'undefined' && Array.isArray(state.errorLogs)){
+    state.errorLogs.unshift({ts:new Date().toISOString(), module:'promise', message:reason?String(reason.message||reason):'Unhandled rejection', stack:reason&&reason.stack?reason.stack:''});
+    state.errorLogs = state.errorLogs.slice(0,100);
+  }
+};
+
+/* ============================================================
+   DATA INTEGRITY HELPERS
+   ============================================================ */
+function safeNum(v, fallback){ const n=Number(v); return isFinite(n)?n:(fallback!==undefined?fallback:0); }
+function safeDiv(a, b, fallback){ return (b===0||!isFinite(b))?( fallback!==undefined?fallback:0):a/b; }
+function safeDate(d){ if(!d) return null; const dt=new Date(d); return isNaN(dt.getTime())?null:dt; }
+function safeJson(str, fallback){ try{ return JSON.parse(str); }catch(e){ return fallback!==undefined?fallback:null; } }
+function safeArr(v){ return Array.isArray(v)?v:[]; }
+
 /* ============================================================
    PART 1 — CONSTANTS, MODULES CONFIG, DB LAYER, UTILS, STATE, ROUTER
    ============================================================ */
@@ -670,7 +726,9 @@ const MODULES = [
   {id:'equityCurve',        label:'Equity Curve',        icon:'line-chart',       month:1},
   {id:'drawdownAnalysis',   label:'Drawdown Analysis',   icon:'trending-down',    month:1},
   {id:'tradeReplay',        label:'Trade Replay',        icon:'rotate-ccw',       month:2},
-  {id:'reports',            label:'Reports',             icon:'file-text',       month:2},
+  {id:'reports',            label:'Reports',             icon:'file-text',        month:2},
+  {id:'positionAnalyzer',   label:'Position Analyzer',   icon:'layers',           month:3},
+  {id:'automationReadiness',label:'Automation Readiness',icon:'rocket',           month:6},
   {id:'settings',           label:'Settings',            icon:'settings',         month:0},
 ];
 const ALWAYS_UNLOCKED = ['dashboard','settings'];
@@ -699,12 +757,14 @@ const LOCKED_COPY = {
   volatilityAnalysis: 'IV percentile, IV rank and historical volatility, computed from data you log.',
   tradeReplay:        'Step back through a closed trade leg-by-leg, with your own notes at each stage.',
   reports:            'Export polished PDF performance reports for any date range.',
+  positionAnalyzer:   'Portfolio Greeks, capital exposure, margin usage and worst-case stress test across all open paper positions.',
+  automationReadiness:'Month 6 migration checklist — readiness score, broker API prep, webhook and Telegram simulators.',
 };
 
 // ---------- INDEXEDDB LAYER ----------
 const DB_NAME = 'algopilot_db';
-const DB_VERSION = 3;
-const STORES = ['strategies','journal','backups','checklist','watchlist','paperPositions','paperOrders','bsCalculations','optionChainSnapshots','volatilityObservations'];
+const DB_VERSION = 5;
+const STORES = ['strategies','journal','backups','checklist','watchlist','paperPositions','paperOrders','bsCalculations','optionChainSnapshots','volatilityObservations','backtests','economicEvents','marketBreadthData'];
 let dbInstance = null;
 
 function openDatabase(){
@@ -807,6 +867,10 @@ const state = {
   bsCalculations:[],
   optionChainSnapshots:[],
   volatilityObservations:[],
+  backtests:[],
+  economicEvents:[],
+  marketBreadthData:[],
+  errorLogs:[],
   ready:false,
 };
 
@@ -1168,6 +1232,9 @@ async function reloadAllData(){
   state.bsCalculations = await dbGetAll('bsCalculations');
   state.optionChainSnapshots = await dbGetAll('optionChainSnapshots');
   state.volatilityObservations = await dbGetAll('volatilityObservations');
+  state.backtests = await dbGetAll('backtests');
+  state.economicEvents = await dbGetAll('economicEvents');
+  state.marketBreadthData = await dbGetAll('marketBreadthData');
   updateEquityPulse();
 }
 
@@ -1536,8 +1603,19 @@ function renderSettings(container){
     </div>
 
     <div class="card" style="margin-top:16px;">
-      <div class="card-title"><span>About</span>${lucideIcon('info')}</div>
-      <div class="disclaimer-box">AlgoPilot is a personal trading journal, backtesting, risk-tracking and paper-trading practice tool for your own education and record-keeping. Paper Trading uses a clearly-labelled simulated price feed and simplified margin/brokerage approximations — it does not place real trades, connect to a live broker, or provide financial advice. All figures are derived solely from data you enter or from the simulated feed.</div>
+      <div class="card-title"><span>App Version & Health</span>${lucideIcon('info')}</div>
+      <div class="settings-row"><div class="sr-label">Version</div><strong>AlgoPilot v${APP_VERSION}</strong></div>
+      <div class="settings-row"><div class="sr-label">Build date</div><span>${APP_BUILD_DATE}</span></div>
+      <div class="settings-row"><div class="sr-label">Last backup</div><span>${state.settings.lastBackupAt?formatDate(state.settings.lastBackupAt):'Never'}</span></div>
+      <div class="settings-row"><div class="sr-label">Total strategies</div><span class="mono">${state.strategies.length}</span></div>
+      <div class="settings-row"><div class="sr-label">Total journal trades</div><span class="mono">${state.journal.length}</span></div>
+      <div class="settings-row"><div class="sr-label">Paper positions</div><span class="mono">${state.paperPositions.length}</span></div>
+      <div class="settings-row"><div class="sr-label">Watchlist items</div><span class="mono">${state.watchlist.length}</span></div>
+      <div class="settings-row"><div class="sr-label">Error log entries</div><span class="mono ${state.errorLogs.length>0?'warn':''}">${state.errorLogs.length}</span></div>
+      <div class="settings-row"><div class="sr-label">IndexedDB stores</div><span class="mono">${STORES.length} stores</span></div>
+      <div class="divider"></div>
+      <div class="disclaimer-box">AlgoPilot is a personal trading journal, backtesting, risk-tracking and paper-trading practice tool for your own education and record-keeping. Paper Trading uses a clearly-labelled simulated price feed — it does not place real trades, connect to a live broker, or provide financial advice.</div>
+      <button class="btn btn-ghost btn-block" style="margin-top:10px;" id="set-view-errors">${lucideIcon('alert-triangle')} View Error Center (${state.errorLogs.length})</button>
     </div>
   `;
   renderRoadmapCards();
@@ -1606,6 +1684,7 @@ function wireSettingsEvents(){
   });
   document.getElementById('export-json').addEventListener('click', exportAllDataJson);
   document.getElementById('import-json').addEventListener('change', importDataJson);
+  document.getElementById('set-view-errors').addEventListener('click', ()=> openErrorCenter());
 }
 
 function exportAllDataJson(){
@@ -1631,6 +1710,9 @@ function importDataJson(e){
     let data;
     try{ data = JSON.parse(reader.result); }
     catch(err){ showToast('That file is not valid JSON', 'error'); return; }
+    const validation = typeof validateImportPayload==='function' ? validateImportPayload(data) : {valid:true, errors:[], totalRecords:0};
+    if(!validation.valid){ showToast('Import rejected: '+validation.errors[0], 'error'); return; }
+    const recordCount = validation.totalRecords;
     showConfirm({
       title:'Overwrite current data?',
       message:'Importing will replace all strategies, journal entries, watchlist, checklist items and paper trading history currently stored. This cannot be undone.',
@@ -1731,6 +1813,49 @@ const TEMPLATES = {
         {id:uid(), instrument:'option', side:'long',  optionType:'call', strike:round5(spot*1.0), price:9, qty:1, expiry:'Far month'},
       ]
     })
+  },
+  ironFly: {
+    label:'Iron Fly', icon:'crosshair',
+    desc:'Sell ATM call + ATM put, buy OTM wings. Maximum credit, profits from low-volatility, range-bound markets.',
+    build:(spot)=>({type:'ironFly', underlyingPrice:spot, lotSize:1, legs:[
+      {id:uid(), instrument:'option', side:'long',  optionType:'put',  strike:round5(spot*0.92), price:3,  qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'short', optionType:'put',  strike:round5(spot*1.00), price:18, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'short', optionType:'call', strike:round5(spot*1.00), price:18, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'long',  optionType:'call', strike:round5(spot*1.08), price:3,  qty:1, expiry:''},
+    ]})
+  },
+  straddle: {
+    label:'Long Straddle', icon:'move',
+    desc:'Buy ATM call + ATM put. Profits from large moves in either direction. Best before high-IV events.',
+    build:(spot)=>({type:'straddle', underlyingPrice:spot, lotSize:1, legs:[
+      {id:uid(), instrument:'option', side:'long', optionType:'call', strike:round5(spot*1.00), price:20, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'long', optionType:'put',  strike:round5(spot*1.00), price:18, qty:1, expiry:''},
+    ]})
+  },
+  shortStraddle: {
+    label:'Short Straddle', icon:'minimize-2',
+    desc:'Sell ATM call + ATM put. Maximum credit, uncapped risk. Only for high-IV, range-bound environments.',
+    build:(spot)=>({type:'shortStraddle', underlyingPrice:spot, lotSize:1, legs:[
+      {id:uid(), instrument:'option', side:'short', optionType:'call', strike:round5(spot*1.00), price:20, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'short', optionType:'put',  strike:round5(spot*1.00), price:18, qty:1, expiry:''},
+    ]})
+  },
+  strangle: {
+    label:'Long Strangle', icon:'maximize-2',
+    desc:'Buy OTM call + OTM put. Lower cost than straddle, needs a larger move to profit.',
+    build:(spot)=>({type:'strangle', underlyingPrice:spot, lotSize:1, legs:[
+      {id:uid(), instrument:'option', side:'long', optionType:'call', strike:round5(spot*1.05), price:12, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'long', optionType:'put',  strike:round5(spot*0.95), price:10, qty:1, expiry:''},
+    ]})
+  },
+  jadeLizard: {
+    label:'Jade Lizard', icon:'zap',
+    desc:'Sell OTM put + sell OTM call spread. No upside risk if total credit ≥ call spread width. Bullish neutral.',
+    build:(spot)=>({type:'jadeLizard', underlyingPrice:spot, lotSize:1, legs:[
+      {id:uid(), instrument:'option', side:'short', optionType:'put',  strike:round5(spot*0.94), price:14, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'short', optionType:'call', strike:round5(spot*1.05), price:10, qty:1, expiry:''},
+      {id:uid(), instrument:'option', side:'long',  optionType:'call', strike:round5(spot*1.10), price:4,  qty:1, expiry:''},
+    ]})
   },
 };
 
@@ -4254,6 +4379,1534 @@ function renderVolatilityAnalysis(container){
   refreshIcons();
 }
 VIEW_RENDERERS.volatilityAnalysis = renderVolatilityAnalysis;
+
+/* ============================================================
+   PART 16 — BACKTESTING ENGINE
+   Full CSV import, column mapping, 15 performance metrics,
+   equity curve, drawdown curve, monthly heatmap, histogram.
+   ============================================================ */
+let btActiveProfile = null;
+let btColumnMap = {};
+let btParsedRows = [];
+let btEquityChartInst = null;
+let btDdChartInst = null;
+let btHistChartInst = null;
+
+// ---------- Metrics engine ----------
+function computeBacktestMetrics(trades, initialCapital){
+  const capital = initialCapital || 100000;
+  const closed = trades.filter(t => t.pnl != null);
+  if(!closed.length) return null;
+
+  const sorted = [...closed].sort((a,b) => new Date(a.date) - new Date(b.date));
+  const wins = sorted.filter(t => t.pnl > 0);
+  const losses = sorted.filter(t => t.pnl < 0);
+
+  const grossProfit = wins.reduce((s,t) => s+t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((s,t) => s+t.pnl, 0));
+  const netPnl = grossProfit - grossLoss;
+
+  const winRate = (wins.length / sorted.length) * 100;
+  const avgWin = wins.length ? grossProfit / wins.length : 0;
+  const avgLoss = losses.length ? grossLoss / losses.length : 0;
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0);
+  const expectancy = (winRate/100)*avgWin - (1-winRate/100)*avgLoss;
+  const largestWin = wins.length ? Math.max(...wins.map(t=>t.pnl)) : 0;
+  const largestLoss = losses.length ? Math.max(...losses.map(t=>Math.abs(t.pnl))) : 0;
+
+  // Consecutive wins/losses
+  let maxConsecWins=0, maxConsecLosses=0, curW=0, curL=0;
+  sorted.forEach(t => {
+    if(t.pnl>0){ curW++; curL=0; maxConsecWins=Math.max(maxConsecWins,curW); }
+    else{ curL++; curW=0; maxConsecLosses=Math.max(maxConsecLosses,curL); }
+  });
+
+  // Equity curve & drawdown
+  let equity = capital, peak = capital;
+  let maxDD = 0, maxDDPct = 0;
+  const curve = [];
+  sorted.forEach(t => {
+    equity += t.pnl;
+    peak = Math.max(peak, equity);
+    const dd = peak - equity;
+    const ddPct = peak > 0 ? (dd/peak)*100 : 0;
+    maxDD = Math.max(maxDD, dd);
+    maxDDPct = Math.max(maxDDPct, ddPct);
+    curve.push({date:t.date, equity, dd:ddPct});
+  });
+
+  // CAGR
+  const firstDate = new Date(sorted[0].date);
+  const lastDate = new Date(sorted[sorted.length-1].date);
+  const years = Math.max((lastDate-firstDate)/(365.25*24*3600*1000), 1/365);
+  const cagr = years > 0 ? (Math.pow(equity/capital, 1/years) - 1)*100 : 0;
+
+  // Sharpe & Sortino from daily P&L
+  const dayMap = {};
+  sorted.forEach(t => { const d=t.date.slice(0,10); dayMap[d]=(dayMap[d]||0)+t.pnl; });
+  const dailyRets = Object.values(dayMap).map(p => capital>0?p/capital:0);
+  const meanRet = dailyRets.length ? dailyRets.reduce((a,b)=>a+b,0)/dailyRets.length : 0;
+  const retVariance = dailyRets.length>1 ? dailyRets.reduce((a,b)=>a+(b-meanRet)*(b-meanRet),0)/(dailyRets.length-1) : 0;
+  const retStdev = Math.sqrt(retVariance);
+  const sharpe = retStdev>0 ? (meanRet/retStdev)*Math.sqrt(252) : 0;
+  const downRets = dailyRets.filter(r=>r<0);
+  const downVariance = downRets.length>1 ? downRets.reduce((a,b)=>a+b*b,0)/downRets.length : 0;
+  const sortino = downVariance>0 ? (meanRet/Math.sqrt(downVariance))*Math.sqrt(252) : 0;
+
+  const recoveryFactor = maxDD > 0 ? netPnl/maxDD : (netPnl>0?Infinity:0);
+
+  // Monthly returns
+  const monthMap = {};
+  sorted.forEach(t => { const ym=t.date.slice(0,7); monthMap[ym]=(monthMap[ym]||0)+t.pnl; });
+
+  // Yearly returns
+  const yearMap = {};
+  sorted.forEach(t => { const y=t.date.slice(0,4); yearMap[y]=(yearMap[y]||0)+t.pnl; });
+
+  return {
+    totalTrades:sorted.length, wins:wins.length, losses:losses.length,
+    winRate, avgWin, avgLoss, grossProfit, grossLoss, netPnl,
+    profitFactor, expectancy, largestWin, largestLoss,
+    maxConsecWins, maxConsecLosses,
+    cagr, sharpe, sortino, recoveryFactor,
+    maxDD, maxDDPct, equity, capital,
+    curve, monthMap, yearMap, dailyRets,
+  };
+}
+
+// ---------- CSV parser & column mapper ----------
+function parseCSVText(text){
+  const lines = text.trim().split('\n').filter(l=>l.trim());
+  if(lines.length<2) return {headers:[], rows:[]};
+  const parseRow = line => {
+    const cells=[]; let cur='', inQ=false;
+    for(let i=0;i<line.length;i++){
+      const c=line[i];
+      if(c==='"'&&!inQ){inQ=true;}
+      else if(c==='"'&&inQ&&line[i+1]==='"'){cur+='"';i++;}
+      else if(c==='"'&&inQ){inQ=false;}
+      else if(c===','&&!inQ){cells.push(cur.trim());cur='';}
+      else cur+=c;
+    }
+    cells.push(cur.trim());
+    return cells;
+  };
+  const headers = parseRow(lines[0]);
+  const rows = lines.slice(1).map(l=>{ const vals=parseRow(l); const obj={}; headers.forEach((h,i)=>obj[h]=vals[i]||''); return obj; });
+  return {headers, rows};
+}
+function inferColumnMap(headers){
+  const map = {};
+  const lower = headers.map(h=>h.toLowerCase());
+  const findBest = (keywords) => { for(const kw of keywords){ const i=lower.findIndex(h=>h.includes(kw)); if(i>-1) return headers[i]; } return ''; };
+  map.date   = findBest(['date','entry date','trade date','open date']);
+  map.pnl    = findBest(['pnl','profit','net profit','net pnl','p&l','gain','loss']);
+  map.symbol = findBest(['symbol','ticker','instrument','scrip','stock']);
+  map.side   = findBest(['side','direction','type','action','buy/sell']);
+  map.qty    = findBest(['qty','quantity','lots','size','shares']);
+  map.notes  = findBest(['notes','note','comment','remarks','description']);
+  return map;
+}
+function applyColumnMap(rows, map){
+  return rows.map(row => {
+    const rawPnl = map.pnl ? row[map.pnl] : '';
+    const pnlNum = rawPnl ? parseFloat(String(rawPnl).replace(/[₹$,\s]/g,'')) : null;
+    const rawDate = map.date ? row[map.date] : '';
+    let date = rawDate;
+    if(!date || isNaN(Date.parse(date))) date = todayISO();
+    return {
+      date: date.slice(0,10),
+      pnl: isNaN(pnlNum) ? null : pnlNum,
+      symbol: map.symbol ? (row[map.symbol]||'') : '',
+      side: map.side ? (row[map.side]||'') : '',
+      qty: map.qty ? Number(row[map.qty]||0) : 0,
+      notes: map.notes ? (row[map.notes]||'') : '',
+      _raw: row,
+    };
+  });
+}
+
+// ---------- Charts ----------
+function btDestroyCharts(){
+  [btEquityChartInst, btDdChartInst, btHistChartInst].forEach(c=>{ if(c){ c.destroy(); } });
+  btEquityChartInst=btDdChartInst=btHistChartInst=null;
+}
+function btDrawCharts(m){
+  const ec=document.getElementById('bt-equity-canvas');
+  if(ec&&typeof Chart!=='undefined'&&m.curve.length>1){
+    if(btEquityChartInst){btEquityChartInst.destroy();btEquityChartInst=null;}
+    btEquityChartInst=new Chart(ec.getContext('2d'),{type:'line',data:{
+      labels:m.curve.map(c=>c.date),
+      datasets:[{data:m.curve.map(c=>c.equity),borderColor:'#5b8def',borderWidth:2,pointRadius:0,fill:true,backgroundColor:(ctx)=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,160);g.addColorStop(0,'rgba(91,141,239,0.22)');g.addColorStop(1,'rgba(91,141,239,0)');return g;}}]
+    },options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9},callback:v=>formatMoney(v)},grid:{color:'rgba(255,255,255,0.06)'}}}}});
+  }
+  const dc=document.getElementById('bt-dd-canvas');
+  if(dc&&typeof Chart!=='undefined'&&m.curve.length>1){
+    if(btDdChartInst){btDdChartInst.destroy();btDdChartInst=null;}
+    btDdChartInst=new Chart(dc.getContext('2d'),{type:'line',data:{
+      labels:m.curve.map(c=>c.date),
+      datasets:[{data:m.curve.map(c=>-c.dd),borderColor:'#f87171',borderWidth:2,pointRadius:0,fill:true,backgroundColor:'rgba(248,113,113,0.15)'}]
+    },options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:6,font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9},callback:v=>v+'%'},grid:{color:'rgba(255,255,255,0.06)'}}}}});
+  }
+  const hc=document.getElementById('bt-hist-canvas');
+  if(hc&&typeof Chart!=='undefined'&&m.dailyRets.length>1){
+    if(btHistChartInst){btHistChartInst.destroy();btHistChartInst=null;}
+    const buckets=new Array(20).fill(0);
+    const min=Math.min(...m.dailyRets),max=Math.max(...m.dailyRets);
+    const range=max-min||0.01;
+    m.dailyRets.forEach(r=>{ const i=clamp(Math.floor((r-min)/range*19),0,19); buckets[i]++; });
+    const labels=Array.from({length:20},(_,i)=>formatPct((min+range*(i/20))*100,1));
+    btHistChartInst=new Chart(hc.getContext('2d'),{type:'bar',data:{labels,datasets:[{data:buckets,backgroundColor:'rgba(91,141,239,0.6)',borderColor:'#5b8def',borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:8,font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9}},grid:{color:'rgba(255,255,255,0.06)'}}}}});
+  }
+}
+function btCalendarHtml(monthMap){
+  if(!Object.keys(monthMap).length) return emptyState('calendar','No monthly data yet','Import trades to see the monthly return heatmap.');
+  const months = Object.keys(monthMap).sort();
+  const values = Object.values(monthMap);
+  const maxAbs = Math.max(1,...values.map(v=>Math.abs(v)));
+  const years = [...new Set(months.map(m=>m.slice(0,4)))].sort();
+  const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  let html = `<div style="overflow-x:auto;"><table style="border-collapse:separate;border-spacing:3px;min-width:520px;"><thead><tr><th style="font-size:10px;color:var(--text-tertiary);text-align:left;padding:3px 6px;">Year</th>${MON.map(m=>`<th style="font-size:10px;color:var(--text-tertiary);text-align:center;padding:3px 4px;">${m}</th>`).join('')}<th style="font-size:10px;color:var(--text-tertiary);text-align:right;padding:3px 6px;">Total</th></tr></thead><tbody>`;
+  years.forEach(y=>{
+    const yearTotal = Object.entries(monthMap).filter(([k])=>k.startsWith(y)).reduce((s,[,v])=>s+v,0);
+    html+=`<tr><td class="mono" style="font-size:11px;font-weight:600;padding:3px 6px;">${y}</td>`;
+    for(let mo=1;mo<=12;mo++){
+      const key=`${y}-${String(mo).padStart(2,'0')}`;
+      const val=monthMap[key];
+      const alpha=val!=null?clamp(Math.abs(val)/maxAbs*0.85,0.1,0.85):0;
+      const bg=val==null?'transparent':val>=0?`rgba(52,211,153,${alpha})`:`rgba(248,113,113,${alpha})`;
+      html+=`<td style="text-align:center;background:${bg};border-radius:4px;padding:4px 2px;font-size:9.5px;" class="mono">${val!=null?formatNum(val/1000,1)+'K':'—'}</td>`;
+    }
+    html+=`<td class="mono" style="font-size:11px;text-align:right;padding:3px 6px;" class="${yearTotal>=0?'profit':'loss'}">${formatMoney(yearTotal)}</td></tr>`;
+  });
+  html+=`</tbody></table></div>`;
+  return html;
+}
+function btMetricsCardHtml(m){
+  return `<div class="kpi-grid">
+    ${kpiCard('Win Rate', formatPct(m.winRate,1), m.winRate>=50?'profit':'loss', 'percent')}
+    ${kpiCard('CAGR', formatPct(m.cagr,1), m.cagr>=0?'profit':'loss', 'trending-up')}
+    ${kpiCard('Sharpe Ratio', formatNum(m.sharpe,2), m.sharpe>=1?'profit':m.sharpe>=0?'':'loss', 'activity')}
+    ${kpiCard('Sortino Ratio', formatNum(m.sortino,2), m.sortino>=1?'profit':m.sortino>=0?'':'loss', 'trending-up')}
+    ${kpiCard('Profit Factor', m.profitFactor===Infinity?'∞':formatNum(m.profitFactor,2), m.profitFactor>=1.5?'profit':m.profitFactor>=1?'':'loss', 'scale')}
+    ${kpiCard('Recovery Factor', m.recoveryFactor===Infinity?'∞':formatNum(m.recoveryFactor,2), m.recoveryFactor>=2?'profit':'', 'rotate-ccw')}
+    ${kpiCard('Expectancy', formatMoney(m.expectancy), m.expectancy>=0?'profit':'loss', 'target')}
+    ${kpiCard('Max Drawdown', formatPct(m.maxDDPct,1), 'loss', 'trending-down')}
+    ${kpiCard('Avg Win', formatMoney(m.avgWin), 'profit', 'arrow-up')}
+    ${kpiCard('Avg Loss', formatMoney(m.avgLoss), 'loss', 'arrow-down')}
+    ${kpiCard('Largest Win', formatMoney(m.largestWin), 'profit', 'star')}
+    ${kpiCard('Largest Loss', formatMoney(m.largestLoss), 'loss', 'alert-triangle')}
+    ${kpiCard('Max Consec. Wins', String(m.maxConsecWins), 'profit', 'zap')}
+    ${kpiCard('Max Consec. Losses', String(m.maxConsecLosses), 'loss', 'zap-off')}
+    ${kpiCard('Total Trades', String(m.totalTrades), '', 'list')}
+  </div>`;
+}
+
+// ---------- Column mapper UI ----------
+function renderColumnMapper(container, headers, onConfirm){
+  const fields = [{key:'date',label:'Date *',required:true},{key:'pnl',label:'P&L *',required:true},{key:'symbol',label:'Symbol'},{key:'side',label:'Side/Direction'},{key:'qty',label:'Qty/Lots'},{key:'notes',label:'Notes'}];
+  const inferred = inferColumnMap(headers);
+  container.innerHTML = `
+    <div class="view-head"><h1>Map CSV Columns</h1><p class="sub">${headers.length} columns found. Match each field to the correct CSV column.</p></div>
+    <div class="card" style="margin-bottom:16px;">
+      ${fields.map(f=>`<div class="field"><label>${escapeHtml(f.label)}</label><select data-mapkey="${f.key}">
+        <option value="">(skip)</option>
+        ${headers.map(h=>`<option value="${escapeHtml(h)}" ${inferred[f.key]===h?'selected':''}>${escapeHtml(h)}</option>`).join('')}
+      </select></div>`).join('')}
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-ghost btn-block" id="btmap-cancel">Cancel</button>
+      <button class="btn btn-primary btn-block" id="btmap-confirm">${lucideIcon('check')} Apply Mapping</button>
+    </div>
+  `;
+  document.getElementById('btmap-cancel').addEventListener('click', ()=> navigateTo('backtesting'));
+  document.getElementById('btmap-confirm').addEventListener('click', ()=>{
+    const map = {};
+    container.querySelectorAll('[data-mapkey]').forEach(sel=>{ if(sel.value) map[sel.dataset.mapkey]=sel.value; });
+    onConfirm(map);
+  });
+  refreshIcons();
+}
+
+// ---------- Profile UI ----------
+function btProfileListHtml(){
+  if(!state.backtests.length) return emptyState('history','No backtest profiles','Import a CSV or create a manual profile to get started.');
+  return state.backtests.map(bt=>{
+    const m = bt.metrics;
+    return `<div class="list-row" style="cursor:pointer;" data-action="bt-open" data-id="${bt.id}">
+      <div style="flex:1;">
+        <div style="font-weight:600;font-size:13.5px;">${escapeHtml(bt.name)}</div>
+        <div class="sub" style="font-size:11.5px;">${bt.trades.length} trades · ${m?('Win '+formatPct(m.winRate,0)+' · PF '+( m.profitFactor===Infinity?'∞':formatNum(m.profitFactor,2))):''} · ${formatDate(bt.createdAt)}</div>
+      </div>
+      <button class="icon-btn" style="width:30px;height:30px;" data-action="bt-delete" data-id="${bt.id}">${lucideIcon('trash-2')}</button>
+    </div>`;
+  }).join('');
+}
+
+// ---------- Main renderer ----------
+function renderBacktesting(container){
+  if(btActiveProfile){
+    renderBacktestProfile(container, btActiveProfile);
+    return;
+  }
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Backtesting</h1><p class="sub">Import a trade CSV or log trades manually, then analyse performance with 15 metrics</p></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="bt-new-manual">${lucideIcon('plus')} New Profile</button>
+        <button class="btn btn-primary" id="bt-import-csv">${lucideIcon('upload')} Import CSV</button>
+        <input type="file" id="bt-csv-input" accept=".csv" style="display:none;">
+      </div>
+    </div>
+    <div class="card"><div id="bt-profile-list">${btProfileListHtml()}</div></div>
+  `;
+  document.getElementById('bt-import-csv').addEventListener('click', ()=> document.getElementById('bt-csv-input').click());
+  document.getElementById('bt-csv-input').addEventListener('change', (e)=>{
+    const file = e.target.files[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev)=>{
+      const {headers, rows} = parseCSVText(ev.target.result);
+      if(!headers.length){ showToast('Could not parse CSV — check the file format', 'error'); return; }
+      btParsedRows = rows;
+      renderColumnMapper(container, headers, async (map)=>{
+        btColumnMap = map;
+        const trades = applyColumnMap(btParsedRows, map);
+        await saveBtProfile(file.name.replace(/\.csv$/i,''), trades);
+        navigateTo('backtesting');
+      });
+    };
+    reader.readAsText(file);
+    e.target.value='';
+  });
+  document.getElementById('bt-new-manual').addEventListener('click', async ()=>{
+    const name = prompt('Profile name:');
+    if(!name) return;
+    await saveBtProfile(name, []);
+    const newProfile = state.backtests[state.backtests.length-1];
+    btActiveProfile = newProfile;
+    navigateTo('backtesting');
+  });
+  document.getElementById('bt-profile-list').addEventListener('click', (e)=>{
+    const btn = e.target.closest('[data-action]');
+    if(!btn) return;
+    const bt = state.backtests.find(b=>b.id===btn.dataset.id);
+    if(!bt) return;
+    if(btn.dataset.action==='bt-open'){ btActiveProfile=bt; navigateTo('backtesting'); }
+    if(btn.dataset.action==='bt-delete'){
+      showConfirm({title:'Delete profile?', message:'This will permanently remove the backtest profile and all its trades.', okLabel:'Delete', onConfirm:async()=>{
+        await dbDelete('backtests', bt.id);
+        state.backtests = state.backtests.filter(b=>b.id!==bt.id);
+        navigateTo('backtesting');
+      }});
+    }
+  });
+  refreshIcons();
+}
+
+async function saveBtProfile(name, trades){
+  const metrics = trades.length >= 2 ? computeBacktestMetrics(trades, 100000) : null;
+  const profile = {id:uid(), name, trades, metrics, initialCapital:100000, createdAt:new Date().toISOString()};
+  await dbPut('backtests', profile);
+  const idx = state.backtests.findIndex(b=>b.id===profile.id);
+  if(idx>-1) state.backtests[idx]=profile; else state.backtests.push(profile);
+  return profile;
+}
+
+function renderBacktestProfile(container, profile){
+  const m = profile.metrics;
+  container.innerHTML = `
+    <div class="view-head-row" style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <button class="icon-btn" id="bt-back-btn">${lucideIcon('arrow-left')}</button>
+        <div><h1 style="margin:0;">${escapeHtml(profile.name)}</h1><p class="sub" style="margin:0;">${profile.trades.length} trades · Capital ₹${formatNum(profile.initialCapital,0)}</p></div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="bt-add-trade">${lucideIcon('plus')} Add Trade</button>
+        <button class="btn btn-ghost btn-sm" id="bt-export-json">${lucideIcon('download')} Export JSON</button>
+      </div>
+    </div>
+    ${m ? btMetricsCardHtml(m) : `<div class="card" style="margin-bottom:16px;">${emptyState('bar-chart-3','Not enough trades','Add at least 2 trades with P&L to compute metrics.')}</div>`}
+    ${m && m.curve.length>1 ? `
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card"><div class="card-title"><span>Equity Curve</span></div><div style="height:180px;"><canvas id="bt-equity-canvas"></canvas></div></div>
+      <div class="card"><div class="card-title"><span>Drawdown Curve</span></div><div style="height:180px;"><canvas id="bt-dd-canvas"></canvas></div></div>
+    </div>
+    <div class="grid-2" style="margin-bottom:16px;">
+      <div class="card"><div class="card-title"><span>Return Distribution</span></div><div style="height:180px;"><canvas id="bt-hist-canvas"></canvas></div></div>
+      <div class="card"><div class="card-title"><span>Monthly Returns Heatmap</span></div>${btCalendarHtml(m.monthMap)}</div>
+    </div>` : ''}
+    <div class="card">
+      <div class="card-title"><span>Trade List (${profile.trades.length})</span></div>
+      <div id="bt-trade-list">${btTradeListHtml(profile)}</div>
+    </div>
+  `;
+  document.getElementById('bt-back-btn').addEventListener('click', ()=>{ btActiveProfile=null; btDestroyCharts(); navigateTo('backtesting'); });
+  document.getElementById('bt-export-json').addEventListener('click', ()=>{ downloadJson(profile, 'backtest-'+profile.name.replace(/\s+/g,'-')+'.json'); });
+  document.getElementById('bt-add-trade').addEventListener('click', ()=> openBtTradeForm(profile, null));
+  wireBtTradeList(container, profile);
+  if(m) btDrawCharts(m);
+  refreshIcons();
+}
+
+function btTradeListHtml(profile){
+  if(!profile.trades.length) return emptyState('list','No trades yet','Add trades manually or import a CSV.');
+  const sorted = [...profile.trades].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,200);
+  return `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>P&L</th><th>Notes</th><th></th></tr></thead><tbody>
+    ${sorted.map((t,i)=>`<tr>
+      <td>${formatDate(t.date)}</td>
+      <td>${escapeHtml(t.symbol||'—')}</td>
+      <td>${t.side?('<span class="badge badge-'+(t.side.toLowerCase().includes('buy')||t.side.toLowerCase()==='long'?'profit':'loss')+'">'+escapeHtml(t.side)+'</span>'):'—'}</td>
+      <td class="mono">${t.qty||'—'}</td>
+      <td class="mono ${t.pnl!=null?pnlClass(t.pnl):''}" style="font-weight:600;">${t.pnl!=null?formatMoney(t.pnl):'—'}</td>
+      <td class="sub" style="font-size:11.5px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.notes||'')}</td>
+      <td style="display:flex;gap:4px;">
+        <button class="icon-btn" style="width:26px;height:26px;" data-action="bt-edit-trade" data-idx="${profile.trades.indexOf(t)}">${lucideIcon('pencil')}</button>
+        <button class="icon-btn" style="width:26px;height:26px;" data-action="bt-del-trade" data-idx="${profile.trades.indexOf(t)}">${lucideIcon('trash-2')}</button>
+      </td>
+    </tr>`).join('')}
+  </tbody></table></div>`;
+}
+function wireBtTradeList(container, profile){
+  const list = container.querySelector('#bt-trade-list');
+  if(!list) return;
+  list.querySelectorAll('[data-action]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const idx = Number(btn.dataset.idx);
+      if(btn.dataset.action==='bt-edit-trade') openBtTradeForm(profile, idx);
+      if(btn.dataset.action==='bt-del-trade'){
+        profile.trades.splice(idx,1);
+        profile.metrics = profile.trades.length>=2 ? computeBacktestMetrics(profile.trades, profile.initialCapital) : null;
+        await dbPut('backtests', profile);
+        const si = state.backtests.findIndex(b=>b.id===profile.id); if(si>-1) state.backtests[si]=profile;
+        btActiveProfile=profile;
+        navigateTo('backtesting');
+      }
+    });
+  });
+  refreshIcons();
+}
+function openBtTradeForm(profile, editIdx){
+  const existing = editIdx!=null ? profile.trades[editIdx] : null;
+  const bodyEl = document.createElement('div');
+  bodyEl.innerHTML = `
+    <div class="row-2">
+      <div class="field"><label>Date</label><input type="date" id="btf-date" value="${existing?existing.date:todayISO()}"></div>
+      <div class="field"><label>Symbol</label><input type="text" id="btf-symbol" value="${existing?escapeHtml(existing.symbol||''):''}"></div>
+    </div>
+    <div class="row-3">
+      <div class="field"><label>Side</label><select id="btf-side"><option value="">—</option><option value="Long" ${existing&&existing.side==='Long'?'selected':''}>Long / Buy</option><option value="Short" ${existing&&existing.side==='Short'?'selected':''}>Short / Sell</option></select></div>
+      <div class="field"><label>Qty / Lots</label><input type="number" id="btf-qty" value="${existing?existing.qty:''}"></div>
+      <div class="field"><label>P&L (₹)</label><input type="number" id="btf-pnl" value="${existing&&existing.pnl!=null?existing.pnl:''}" placeholder="negative for loss"></div>
+    </div>
+    <div class="field"><label>Notes</label><textarea id="btf-notes" rows="2">${existing?escapeHtml(existing.notes||''):''}</textarea></div>
+  `;
+  const footerEl = document.createElement('div');
+  footerEl.style.display='flex'; footerEl.style.gap='10px'; footerEl.style.width='100%';
+  footerEl.innerHTML = `<button class="btn btn-ghost btn-block" id="btf-cancel">Cancel</button><button class="btn btn-primary btn-block" id="btf-save">${lucideIcon('check')} Save</button>`;
+  openSheet({title: existing?'Edit Trade':'Add Trade', bodyEl, footerEl});
+  document.getElementById('btf-cancel').addEventListener('click', closeSheet);
+  document.getElementById('btf-save').addEventListener('click', async ()=>{
+    const trade = {
+      date: document.getElementById('btf-date').value || todayISO(),
+      symbol: document.getElementById('btf-symbol').value.trim(),
+      side: document.getElementById('btf-side').value,
+      qty: Number(document.getElementById('btf-qty').value)||0,
+      pnl: document.getElementById('btf-pnl').value!=='' ? Number(document.getElementById('btf-pnl').value) : null,
+      notes: document.getElementById('btf-notes').value.trim(),
+    };
+    if(editIdx!=null) profile.trades[editIdx]=trade; else profile.trades.push(trade);
+    profile.metrics = profile.trades.length>=2 ? computeBacktestMetrics(profile.trades, profile.initialCapital) : null;
+    await dbPut('backtests', profile);
+    const si = state.backtests.findIndex(b=>b.id===profile.id); if(si>-1) state.backtests[si]=profile;
+    btActiveProfile=profile;
+    closeSheet();
+    navigateTo('backtesting');
+    showToast('Trade saved', 'success');
+  });
+  refreshIcons();
+}
+function downloadJson(obj, filename){
+  const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=filename;
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+VIEW_RENDERERS.backtesting = renderBacktesting;
+
+/* ============================================================
+   PART 17 — TRADE REPLAY
+   ============================================================ */
+let replayIndex = 0;
+let replayTimer = null;
+let replaySpeed = 1000;
+let replayEquityChartInst = null;
+
+function getReplayTrades(){
+  return [...state.journal]
+    .filter(t => t.date || t.entryDate || t.openedAt)
+    .sort((a,b)=>{ const da=new Date(a.date||a.entryDate||a.openedAt); const db=new Date(b.date||b.entryDate||b.openedAt); return da-db; });
+}
+function replayRunningStats(trades, upToIdx){
+  let capital=safeNum(state.settings.totalCapital,1000000), cumPnl=0, wins=0, losses=0;
+  for(let i=0;i<=upToIdx&&i<trades.length;i++){
+    const pnl=safeNum(trades[i].pnl,0); cumPnl+=pnl; capital+=pnl;
+    if(pnl>0) wins++; if(pnl<0) losses++;
+  }
+  return {capital, cumPnl, wins, losses, winRate:safeDiv(wins,upToIdx+1,0)*100};
+}
+function replaySessionSummary(trades){
+  if(!trades.length) return '';
+  const closed=trades.filter(t=>t.pnl!=null);
+  if(closed.length<2) return '';
+  const total=closed.reduce((s,t)=>s+safeNum(t.pnl,0),0);
+  const wins=closed.filter(t=>safeNum(t.pnl,0)>0);
+  const losses=closed.filter(t=>safeNum(t.pnl,0)<0);
+  const winRate=safeDiv(wins.length,closed.length,0)*100;
+  const avgWin=wins.length?safeDiv(wins.reduce((s,t)=>s+safeNum(t.pnl,0),0),wins.length):0;
+  const avgLoss=losses.length?safeDiv(Math.abs(losses.reduce((s,t)=>s+safeNum(t.pnl,0),0)),losses.length):0;
+  const emotions={};
+  trades.forEach(t=>{ if(t.emotion) emotions[t.emotion]=(emotions[t.emotion]||0)+1; });
+  const topEmotion=Object.entries(emotions).sort((a,b)=>b[1]-a[1])[0];
+  const mistakes=trades.filter(t=>t.mistakes&&t.mistakes.trim()).length;
+  return '<div class="card" style="margin-top:16px;">'+
+    '<div class="card-title"><span>Session Summary</span>'+lucideIcon('bar-chart-3')+'</div>'+
+    '<div class="kpi-grid">'+
+    kpiCard('Net P&L',formatMoney(total),pnlClass(total),'trending-up')+
+    kpiCard('Win Rate',formatPct(winRate,1),winRate>=50?'profit':'loss','percent')+
+    kpiCard('Avg Win',formatMoney(avgWin),'profit','arrow-up')+
+    kpiCard('Avg Loss',formatMoney(avgLoss),'loss','arrow-down')+
+    kpiCard('Trades',String(closed.length),'','list')+
+    kpiCard('Top Emotion',topEmotion?topEmotion[0]:'—','','heart')+
+    kpiCard('Trades w/ Mistakes',String(mistakes),mistakes>0?'warn':'profit','alert-triangle')+
+    kpiCard('With Notes',String(trades.filter(t=>t.notes&&t.notes.trim()).length),'','file-text')+
+    '</div>'+
+    (closed.length>=2?'<div style="height:160px;margin-top:12px;"><canvas id="replay-equity-canvas"></canvas></div>':'')+
+    '</div>';
+}
+function drawReplayEquityChart(trades){
+  const canvas=document.getElementById('replay-equity-canvas');
+  if(!canvas||typeof Chart==='undefined') return;
+  if(replayEquityChartInst){replayEquityChartInst.destroy();replayEquityChartInst=null;}
+  const capital=safeNum(state.settings.totalCapital,1000000);
+  let cum=capital;
+  const closed=trades.filter(t=>t.pnl!=null).sort((a,b)=>new Date(a.date||a.openedAt)-new Date(b.date||b.openedAt));
+  const labels=['Start',...closed.map(t=>(t.date||t.openedAt||'').slice(5,10))];
+  const data=[capital,...closed.map(t=>{cum+=safeNum(t.pnl,0);return cum;})];
+  replayEquityChartInst=new Chart(canvas.getContext('2d'),{
+    type:'line',data:{labels,datasets:[{data,borderColor:'#5b8def',borderWidth:2,pointRadius:2,fill:true,
+      backgroundColor:(ctx)=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,120);g.addColorStop(0,'rgba(91,141,239,0.22)');g.addColorStop(1,'rgba(91,141,239,0)');return g;}}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:8,font:{size:9}},grid:{display:false}},
+        y:{ticks:{color:'#5a6275',font:{size:9},callback:v=>formatMoney(v)},grid:{color:'rgba(255,255,255,0.06)'}}}}
+  });
+}
+function replayTradeCardHtml(t,idx,total,stats){
+  const statusColors={open:'accent',closed:'profit',loss:'loss',breakeven:'warn'};
+  const emotionEmoji={calm:'😌',confident:'😊',fearful:'😨',greedy:'🤑',neutral:'😐',anxious:'😰',euphoric:'🥳',frustrated:'😤'}[t.emotion]||'—';
+  const pnl=safeNum(t.pnl,0);
+  return '<div class="kpi-grid" style="margin-bottom:16px;">'+
+    kpiCard('Trade #',(idx+1)+' / '+total,'','list')+
+    kpiCard('Date',formatDate(t.date||t.entryDate||t.openedAt||new Date().toISOString()),'','calendar')+
+    kpiCard('This P&L',formatMoney(pnl),pnlClass(pnl),'trending-up')+
+    kpiCard('Running Capital',formatMoney(stats.capital),'','wallet')+
+    kpiCard('Cumulative P&L',formatMoney(stats.cumPnl),pnlClass(stats.cumPnl),'bar-chart-3')+
+    kpiCard('Win Rate',formatPct(stats.winRate,1),stats.winRate>=50?'profit':'loss','percent')+
+    '</div>'+
+    '<div class="grid-2" style="margin-bottom:14px;">'+
+    '<div class="card"><div class="card-title"><span>Trade Details</span>'+lucideIcon('info')+'</div>'+
+    '<div class="settings-row"><div class="sr-label">Strategy</div><span>'+escapeHtml(t.strategyName||'—')+'</span></div>'+
+    '<div class="settings-row"><div class="sr-label">Status</div><span class="badge badge-'+(statusColors[t.status]||'neutral')+'">'+escapeHtml(t.status||'—')+'</span></div>'+
+    '<div class="settings-row"><div class="sr-label">Rating</div><span>'+( t.rating?'★'.repeat(safeNum(t.rating,0)):'—')+'</span></div>'+
+    '</div>'+
+    '<div class="card"><div class="card-title"><span>Psychology</span>'+lucideIcon('brain')+'</div>'+
+    '<div class="settings-row"><div class="sr-label">Emotion</div><span style="font-size:16px;">'+emotionEmoji+'</span><span style="margin-left:8px;">'+escapeHtml(t.emotion||'—')+'</span></div>'+
+    '<div class="settings-row"><div class="sr-label">Mistakes</div><span class="'+(t.mistakes?'loss':'')+'">'+escapeHtml(t.mistakes||'None noted')+'</span></div>'+
+    '<div class="settings-row"><div class="sr-label">Followed plan?</div><span>'+( t.followedPlan!=null?(t.followedPlan?'✅ Yes':'❌ No'):'—')+'</span></div>'+
+    '</div></div>'+
+    (t.notes?'<div class="card" style="margin-bottom:14px;"><div class="card-title"><span>Notes</span>'+lucideIcon('file-text')+'</div><p style="font-size:13px;line-height:1.6;">'+escapeHtml(t.notes)+'</p></div>':'')+
+    (t.screenshot?'<div class="card" style="margin-bottom:14px;"><div class="card-title"><span>Screenshot</span>'+lucideIcon('image')+'</div><img src="'+t.screenshot+'" style="width:100%;border-radius:10px;margin-top:8px;max-height:350px;object-fit:contain;" alt="screenshot"></div>':'');
+}
+function renderReplayState(){
+  const trades=getReplayTrades();
+  if(!trades.length){const wrap=document.getElementById('replay-main');if(wrap)wrap.innerHTML=emptyState('book-open','No entries','Add journal trades first.');return;}
+  const t=trades[replayIndex], stats=replayRunningStats(trades,replayIndex);
+  const mainWrap=document.getElementById('replay-main'); if(mainWrap) mainWrap.innerHTML=replayTradeCardHtml(t,replayIndex,trades.length,stats);
+  const slider=document.getElementById('replay-slider'); if(slider) slider.value=replayIndex;
+  const bar=document.getElementById('replay-progress-bar'); if(bar) bar.style.width=safeDiv(replayIndex,Math.max(trades.length-1,1))*100+'%';
+  const counter=document.getElementById('replay-counter'); if(counter) counter.textContent=(replayIndex+1)+' / '+trades.length;
+  const prevBtn=document.getElementById('replay-prev'); if(prevBtn) prevBtn.disabled=replayIndex<=0;
+  const nextBtn=document.getElementById('replay-next'); if(nextBtn) nextBtn.disabled=replayIndex>=trades.length-1;
+  refreshIcons();
+}
+function replayStopAutoplay(){
+  if(replayTimer){clearInterval(replayTimer);replayTimer=null;}
+  const pb=document.getElementById('replay-play-btn'); if(pb) pb.innerHTML=lucideIcon('play')+' Play';
+}
+function replayToggleAutoplay(){
+  if(replayTimer){replayStopAutoplay();return;}
+  const pb=document.getElementById('replay-play-btn'); if(pb) pb.innerHTML=lucideIcon('pause')+' Pause';
+  const trades=getReplayTrades();
+  replayTimer=setInterval(()=>{if(replayIndex>=trades.length-1){replayStopAutoplay();return;}replayIndex++;renderReplayState();},replaySpeed);
+}
+function renderTradeReplay(container){
+  const trades=getReplayTrades();
+  container.innerHTML='<div class="view-head-row"><div><h1>Trade Replay</h1><p class="sub">Step through your journal trade-by-trade — running capital, emotion, session summary</p></div>'+
+    '<select id="replay-speed-sel" style="max-width:150px;"><option value="2000">0.5×</option><option value="1000" selected>1×</option><option value="500">2×</option><option value="200">5×</option></select></div>'+
+    (!trades.length?'<div class="card">'+emptyState('book-open','No journal entries','Add trades to the journal first.')+'</div>':
+    '<div class="card" style="margin-bottom:16px;">'+
+    '<div style="display:flex;justify-content:space-between;margin-bottom:6px;">'+
+    '<span class="sub" style="font-size:11.5px;">'+trades.length+' trades</span>'+
+    '<span id="replay-counter" class="mono">'+( replayIndex+1)+' / '+trades.length+'</span></div>'+
+    '<div style="height:4px;background:rgba(255,255,255,0.08);border-radius:2px;margin-bottom:10px;overflow:hidden;">'+
+    '<div id="replay-progress-bar" style="height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:2px;transition:width 0.3s;width:'+safeDiv(replayIndex,Math.max(trades.length-1,1))*100+'%;"></div></div>'+
+    '<input type="range" id="replay-slider" min="0" max="'+( trades.length-1)+'" value="'+replayIndex+'" style="width:100%;accent-color:var(--accent);">'+
+    '<div style="display:flex;justify-content:center;gap:10px;margin-top:12px;">'+
+    '<button class="btn btn-ghost btn-sm" id="replay-prev" '+( replayIndex<=0?'disabled':'')+'>'+lucideIcon('skip-back')+' Prev</button>'+
+    '<button class="btn btn-primary" id="replay-play-btn">'+lucideIcon('play')+' Play</button>'+
+    '<button class="btn btn-ghost btn-sm" id="replay-next" '+( replayIndex>=trades.length-1?'disabled':'')+'>'+lucideIcon('skip-forward')+' Next</button>'+
+    '<button class="btn btn-ghost btn-sm" id="replay-reset">'+lucideIcon('rotate-ccw')+' Reset</button></div></div>'+
+    '<div id="replay-main"></div>'+
+    replaySessionSummary(trades));
+  if(!trades.length){refreshIcons();return;}
+  document.getElementById('replay-slider').addEventListener('input',(e)=>{replayStopAutoplay();replayIndex=Number(e.target.value);renderReplayState();});
+  document.getElementById('replay-prev').addEventListener('click',()=>{replayStopAutoplay();if(replayIndex>0){replayIndex--;renderReplayState();}});
+  document.getElementById('replay-next').addEventListener('click',()=>{replayStopAutoplay();if(replayIndex<trades.length-1){replayIndex++;renderReplayState();}});
+  document.getElementById('replay-play-btn').addEventListener('click',replayToggleAutoplay);
+  document.getElementById('replay-reset').addEventListener('click',()=>{replayStopAutoplay();replayIndex=0;renderReplayState();});
+  document.getElementById('replay-speed-sel').addEventListener('change',(e)=>{replaySpeed=Number(e.target.value);if(replayTimer){replayStopAutoplay();replayToggleAutoplay();}});
+  renderReplayState();
+  if(trades.filter(t=>t.pnl!=null).length>=2) setTimeout(()=>drawReplayEquityChart(trades),50);
+  refreshIcons();
+}
+VIEW_RENDERERS.tradeReplay = renderTradeReplay;
+
+/* ============================================================
+   PART 18 — AI ANALYSIS
+   Keys stored in localStorage only — never sent anywhere except
+   directly from the user's browser to the chosen API provider.
+   ============================================================ */
+const AI_KEY_LS = 'algopilot_ai_keys';
+let aiActiveMode = 'daily';
+let aiLoading = false;
+
+function loadAIKeys(){ try{ return JSON.parse(localStorage.getItem(AI_KEY_LS)||'{}'); }catch(e){ return {}; } }
+function saveAIKeys(keys){ try{ localStorage.setItem(AI_KEY_LS, JSON.stringify(keys)); }catch(e){} }
+function getActiveAIKey(){
+  const keys = loadAIKeys();
+  if(keys.provider==='gemini' && keys.gemini) return {provider:'gemini', key:keys.gemini};
+  if(keys.provider==='openai' && keys.openai) return {provider:'openai', key:keys.openai};
+  if(keys.openai) return {provider:'openai', key:keys.openai};
+  if(keys.gemini) return {provider:'gemini', key:keys.gemini};
+  return null;
+}
+
+function buildJournalContext(mode){
+  const all = [...state.journal].sort((a,b)=>new Date(b.date||b.openedAt)-new Date(a.date||a.openedAt));
+  let trades = all;
+  if(mode==='daily') trades = all.filter(t=>{ const d=t.date||t.openedAt||''; return d.slice(0,10)===todayISO(); });
+  else if(mode==='weekly') trades = all.filter(t=>{ const d=new Date(t.date||t.openedAt||Date.now()); return (Date.now()-d.getTime())<7*86400000; });
+  else if(mode==='monthly') trades = all.filter(t=>{ const d=t.date||t.openedAt||''; return d.slice(0,7)=== new Date().toISOString().slice(0,7); });
+  else trades = all.slice(0, 40);
+  return trades.map(t=>`Date:${(t.date||t.openedAt||'').slice(0,10)} Strategy:${t.strategyName||'?'} Status:${t.status||'?'} PnL:${t.pnl??'?'} Emotion:${t.emotion||'?'} Mistakes:${t.mistakes||'none'} Rating:${t.rating||'?'} Notes:${(t.notes||'').slice(0,80)}`).join('\n');
+}
+
+function buildAIPrompt(mode, customQuery){
+  const context = buildJournalContext(mode);
+  const tradeCount = state.journal.length;
+  const totalPnl = state.journal.reduce((s,t)=>s+Number(t.pnl||0),0);
+
+  const systemPrompt = `You are an expert trading coach and performance analyst for Indian options markets (NSE/BSE). You have access to a trader's journal data and must provide specific, actionable, honest feedback. Be direct. Focus on patterns, psychology, and concrete improvements. Use INR (₹) for monetary values. Keep responses concise and structured.`;
+
+  const modePrompts = {
+    daily: `Analyze today's trades and provide a daily review:\n${context||'No trades today.'}`,
+    weekly: `Analyze this week's trades for patterns and insights:\n${context||'No trades this week.'}`,
+    monthly: `Provide a monthly performance review with key patterns:\n${context||'No trades this month.'}`,
+    mistakes: `Identify recurring mistakes and behavioural patterns from these ${tradeCount} trades. Total P&L: ₹${formatNum(totalPnl,0)}.\n${context}`,
+    emotions: `Analyze emotional patterns in these trades. Which emotions correlate with losses? With wins? What is the behavioural signature?\n${context}`,
+    patterns: `Detect strategy, timing and setup patterns. Which combinations work? Which fail? Include statistics.\n${context}`,
+    summary: `Summarize overall trading performance across ${tradeCount} trades (₹${formatNum(totalPnl,0)} net P&L). Top insights, risks, strengths.\n${context}`,
+    losing: `Why is this trader losing money? Identify the root causes from this journal data:\n${context||'No closed trades with P&L data.'}`,
+    weekday: `Which day of the week produces the best and worst results? Analyse each day's trades:\n${context}`,
+    worstStrategy: `Which strategy is performing worst and why? Provide evidence from the data:\n${context}`,
+    emotional: `Which trades were the most emotionally driven? What was the outcome? What should change?\n${context}`,
+    custom: customQuery || 'Summarize the trading journal data.',
+  };
+
+  return { systemPrompt, userPrompt: modePrompts[mode] || modePrompts.summary };
+}
+
+async function callOpenAI(key, systemPrompt, userPrompt){
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+    body:JSON.stringify({model:'gpt-4o-mini', max_tokens:1500, messages:[{role:'system',content:systemPrompt},{role:'user',content:userPrompt}]})
+  });
+  if(!res.ok){ const err=await res.json().catch(()=>({})); throw new Error((err.error&&err.error.message)||'OpenAI API error '+res.status); }
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || '(empty response)';
+}
+
+async function callGemini(key, systemPrompt, userPrompt){
+  const model = 'gemini-1.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const res = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({contents:[{parts:[{text:systemPrompt+'\n\n'+userPrompt}]}], generationConfig:{maxOutputTokens:1500}})
+  });
+  if(!res.ok){ const err=await res.json().catch(()=>({})); throw new Error((err.error&&err.error.message)||'Gemini API error '+res.status); }
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '(empty response)';
+}
+
+async function runAIAnalysis(mode, customQuery){
+  const aiKey = getActiveAIKey();
+  if(!aiKey){ showToast('Set an API key in AI Analysis settings first', 'error'); return; }
+  if(aiLoading) return;
+  aiLoading = true;
+  const resultEl = document.getElementById('ai-result');
+  if(resultEl){ resultEl.innerHTML = `<div style="text-align:center;padding:40px;"><div class="spinner"></div><p class="sub" style="margin-top:12px;">Analysing your trades…</p></div>`; }
+  try{
+    const {systemPrompt, userPrompt} = buildAIPrompt(mode, customQuery);
+    let text;
+    if(aiKey.provider==='openai') text = await callOpenAI(aiKey.key, systemPrompt, userPrompt);
+    else text = await callGemini(aiKey.key, systemPrompt, userPrompt);
+    if(resultEl){
+      // render markdown-lite: bold, bullets
+      const html = text
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
+        .replace(/^#{1,3} (.+)$/gm,'<div style="font-weight:700;font-size:14px;margin:12px 0 6px;">$1</div>')
+        .replace(/^[•\-\*] (.+)$/gm,'<div style="padding:2px 0 2px 16px;">• $1</div>')
+        .replace(/\n\n/g,'<br><br>').replace(/\n/g,'<br>');
+      resultEl.innerHTML = `<div style="font-size:13px;line-height:1.75;padding:4px 0;">${html}</div>`;
+    }
+  }catch(e){
+    if(resultEl) resultEl.innerHTML = `<div class="disclaimer-box" style="border-color:var(--loss);">${lucideIcon('alert-triangle')} <strong>API Error:</strong> ${escapeHtml(e.message)}<br><span class="sub">Check your API key and internet connection.</span></div>`;
+    showToast('AI request failed: '+e.message, 'error');
+  }finally{
+    aiLoading = false;
+    refreshIcons();
+  }
+}
+
+function renderAIAnalysis(container){
+  const keys = loadAIKeys();
+  const hasKey = !!(keys.openai || keys.gemini);
+  const modes = [
+    {id:'daily',label:'Daily Review'},{id:'weekly',label:'Weekly Review'},{id:'monthly',label:'Monthly Review'},
+    {id:'mistakes',label:'Mistake Detector'},{id:'emotions',label:'Emotion Tracker'},{id:'patterns',label:'Pattern Detector'},
+    {id:'summary',label:'Journal Summary'},{id:'losing',label:'Why Am I Losing?'},
+    {id:'weekday',label:'Best Weekday'},{id:'worstStrategy',label:'Worst Strategy'},{id:'emotional',label:'Most Emotional Trades'},
+  ];
+  container.innerHTML = `
+    <div class="view-head"><h1>AI Analysis</h1><p class="sub">AI-powered journal analysis — your API key, your data, direct browser requests</p></div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>API Setup</span>${lucideIcon('key')}</div>
+      <p class="sub" style="margin-bottom:12px;">Keys are stored only in your browser's localStorage and sent directly to the chosen API — never via any third-party server.</p>
+      <div class="row-2">
+        <div class="field"><label>OpenAI API key</label><input type="password" id="ai-openai-key" value="${keys.openai||''}" placeholder="sk-…"></div>
+        <div class="field"><label>Gemini API key</label><input type="password" id="ai-gemini-key" value="${keys.gemini||''}" placeholder="AIza…"></div>
+      </div>
+      <div class="field"><label>Active provider</label><select id="ai-provider">
+        <option value="openai" ${keys.provider==='openai'||!keys.provider?'selected':''}>OpenAI (GPT-4o mini)</option>
+        <option value="gemini" ${keys.provider==='gemini'?'selected':''}>Google Gemini 1.5 Flash</option>
+      </select></div>
+      <button class="btn btn-primary btn-block" id="ai-save-keys">${lucideIcon('check')} Save keys</button>
+      ${!hasKey?`<div class="disclaimer-box" style="margin-top:12px;">${lucideIcon('info')} Add an API key above to enable analysis. Get an OpenAI key at platform.openai.com or a Gemini key at aistudio.google.com — both have free tiers suitable for personal use.</div>`:''}
+    </div>
+
+    ${hasKey ? `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Analysis Modes</span>${lucideIcon('sparkles')}</div>
+      <div class="tabs" style="flex-wrap:wrap;gap:6px;margin-bottom:14px;">
+        ${modes.map(m=>`<button class="tab-btn${m.id===aiActiveMode?' active':''}" data-aimode="${m.id}">${m.label}</button>`).join('')}
+      </div>
+      <button class="btn btn-primary btn-block" id="ai-run-btn">${lucideIcon('zap')} Run Analysis${aiLoading?' (running…)':''}</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Custom Query</span>${lucideIcon('message-circle')}</div>
+      <div class="field"><label>Ask anything about your trading journal</label>
+        <textarea id="ai-custom-query" rows="2" placeholder="e.g. Why do I perform better on Thursdays? Show my best iron condor setups."></textarea>
+      </div>
+      <button class="btn btn-ghost btn-block" id="ai-custom-btn">${lucideIcon('send')} Send custom query</button>
+    </div>
+
+    <div class="card"><div class="card-title"><span>Result</span></div>
+      <div id="ai-result">${emptyState('sparkles','Ready to analyse','Choose a mode above and click Run Analysis.')}</div>
+    </div>
+    ` : ''}
+  `;
+
+  document.getElementById('ai-save-keys').addEventListener('click', ()=>{
+    const keys = {openai:document.getElementById('ai-openai-key').value.trim(), gemini:document.getElementById('ai-gemini-key').value.trim(), provider:document.getElementById('ai-provider').value};
+    saveAIKeys(keys);
+    showToast('API keys saved', 'success');
+    navigateTo('aiAnalysis');
+  });
+
+  if(hasKey){
+    container.querySelectorAll('[data-aimode]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        aiActiveMode = btn.dataset.aimode;
+        container.querySelectorAll('[data-aimode]').forEach(b=>b.classList.toggle('active',b===btn));
+      });
+    });
+    document.getElementById('ai-run-btn').addEventListener('click', ()=> runAIAnalysis(aiActiveMode));
+    document.getElementById('ai-custom-btn').addEventListener('click', ()=>{
+      const q = document.getElementById('ai-custom-query').value.trim();
+      if(!q){ showToast('Enter a query first','error'); return; }
+      runAIAnalysis('custom', q);
+    });
+  }
+  refreshIcons();
+}
+VIEW_RENDERERS.aiAnalysis = renderAIAnalysis;
+
+/* ============================================================
+   PART 19 — REPORTS
+   ============================================================ */
+let reportsActiveTab = 'monthly';
+
+function groupJournalByPeriod(period){
+  const closed = state.journal.filter(t=>t.pnl!=null&&(t.date||t.openedAt));
+  const map = {};
+  closed.forEach(t=>{
+    const d = (t.date||t.openedAt||'').slice(0,10);
+    const key = period==='yearly'?d.slice(0,4):period==='weekly'?getWeekKey(d):d.slice(0,7);
+    if(!map[key]) map[key]={key, trades:[], pnl:0};
+    map[key].trades.push(t);
+    map[key].pnl += Number(t.pnl||0);
+  });
+  return Object.values(map).sort((a,b)=>a.key.localeCompare(b.key));
+}
+function getWeekKey(dateStr){
+  const d = new Date(dateStr);
+  const start = new Date(d); start.setDate(d.getDate()-d.getDay());
+  return start.toISOString().slice(0,10);
+}
+function reportsCalendarHtml(){
+  const monthMap={};
+  state.journal.filter(t=>t.pnl!=null&&(t.date||t.openedAt)).forEach(t=>{
+    const ym=(t.date||t.openedAt||'').slice(0,7);
+    monthMap[ym]=(monthMap[ym]||0)+Number(t.pnl||0);
+  });
+  return btCalendarHtml(monthMap);
+}
+function reportPeriodTableHtml(groups, periodLabel){
+  if(!groups.length) return emptyState('file-text','No closed trades yet','Add trades to the journal and mark them closed to generate reports.');
+  const total=groups.reduce((s,g)=>s+g.pnl,0);
+  const wins=groups.filter(g=>g.pnl>0).length, losses=groups.filter(g=>g.pnl<=0).length;
+  return `<div class="table-wrap"><table><thead><tr><th>${periodLabel}</th><th>Trades</th><th>P&L</th><th>Avg P&L</th><th>Best</th><th>Worst</th></tr></thead><tbody>
+    ${groups.map(g=>{
+      const best=Math.max(...g.trades.map(t=>Number(t.pnl||0)));
+      const worst=Math.min(...g.trades.map(t=>Number(t.pnl||0)));
+      return `<tr>
+        <td style="font-weight:600;">${escapeHtml(g.key)}</td>
+        <td class="mono">${g.trades.length}</td>
+        <td class="mono ${pnlClass(g.pnl)}" style="font-weight:700;">${formatMoney(g.pnl)}</td>
+        <td class="mono">${formatMoney(g.pnl/g.trades.length)}</td>
+        <td class="mono profit">${formatMoney(best)}</td>
+        <td class="mono loss">${formatMoney(worst)}</td>
+      </tr>`;
+    }).join('')}
+    </tbody><tfoot><tr style="border-top:1px solid var(--glass-border);">
+      <td style="font-weight:700;">Total</td><td class="mono">${groups.reduce((s,g)=>s+g.trades.length,0)}</td>
+      <td class="mono ${pnlClass(total)}" style="font-weight:700;">${formatMoney(total)}</td><td></td>
+      <td class="mono profit">${formatMoney(Math.max(...groups.map(g=>g.pnl)))}</td>
+      <td class="mono loss">${formatMoney(Math.min(...groups.map(g=>g.pnl)))}</td>
+    </tr></tfoot></table></div>
+    <p class="sub" style="margin-top:8px;font-size:11.5px;">${wins} profitable periods · ${losses} losing periods</p>`;
+}
+
+let reportsChartInst = null;
+function drawReportsChart(groups){
+  const canvas = document.getElementById('reports-chart-canvas');
+  if(!canvas||typeof Chart==='undefined'||!groups.length) return;
+  if(reportsChartInst){reportsChartInst.destroy();reportsChartInst=null;}
+  reportsChartInst = new Chart(canvas.getContext('2d'),{
+    type:'bar',
+    data:{
+      labels:groups.map(g=>g.key),
+      datasets:[{
+        data:groups.map(g=>g.pnl),
+        backgroundColor:groups.map(g=>g.pnl>=0?'rgba(52,211,153,0.7)':'rgba(248,113,113,0.7)'),
+        borderColor:groups.map(g=>g.pnl>=0?'#34d399':'#f87171'),
+        borderWidth:1, borderRadius:4,
+      }]
+    },
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:'#5a6275',font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9},callback:v=>formatMoney(v)},grid:{color:'rgba(255,255,255,0.06)'}}}}
+  });
+}
+
+function exportReportsCSV(){
+  const all = [...state.journal].filter(t=>t.pnl!=null).sort((a,b)=>new Date(a.date||a.openedAt)-new Date(b.date||b.openedAt));
+  const rows=[['Date','Strategy','Status','P&L','Emotion','Rating','Tags','Notes']];
+  all.forEach(t=>rows.push([(t.date||t.openedAt||'').slice(0,10),t.strategyName||'',t.status||'',t.pnl!=null?t.pnl:'',t.emotion||'',t.rating||'',(t.tags||[]).join(';'),(t.notes||'').replace(/\n/g,' ')]));
+  const csv=rows.map(r=>r.map(c=>'"'+String(c||'').replace(/"/g,'""')+'"').join(',')).join('\n');
+  const blob=new Blob([csv],{type:'text/csv'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='algopilot-report-'+todayISO()+'.csv';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+  showToast('CSV exported','success');
+}
+
+function renderReports(container){
+  const tabs=[{id:'monthly',label:'Monthly'},{id:'weekly',label:'Weekly'},{id:'yearly',label:'Yearly'},{id:'calendar',label:'Heatmap'},{id:'trades',label:'All Trades'}];
+  const groups = groupJournalByPeriod(reportsActiveTab==='weekly'?'weekly':reportsActiveTab==='yearly'?'yearly':'monthly');
+
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Reports</h1><p class="sub">Performance summaries, calendar heatmap and export</p></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" id="rep-export-json">${lucideIcon('download')} JSON</button>
+        <button class="btn btn-ghost btn-sm" id="rep-export-csv">${lucideIcon('download')} CSV</button>
+        <button class="btn btn-primary btn-sm" id="rep-print">${lucideIcon('printer')} Print / PDF</button>
+      </div>
+    </div>
+    <div class="kpi-grid" style="margin-bottom:16px;">
+      ${kpiCard('Total Trades', String(state.journal.length), '', 'list')}
+      ${kpiCard('Closed P&L', formatMoney(state.journal.filter(t=>t.pnl!=null).reduce((s,t)=>s+Number(t.pnl),0)), pnlClass(state.journal.filter(t=>t.pnl!=null).reduce((s,t)=>s+Number(t.pnl),0)), 'trending-up')}
+      ${kpiCard('Win Rate', state.journal.filter(t=>t.pnl!=null).length?formatPct(state.journal.filter(t=>Number(t.pnl)>0).length/state.journal.filter(t=>t.pnl!=null).length*100,1):'—', '', 'percent')}
+      ${kpiCard('Strategies Used', String(new Set(state.journal.map(t=>t.strategyName).filter(Boolean)).size), '', 'layers')}
+    </div>
+    <div class="tabs" style="margin-bottom:16px;">
+      ${tabs.map(t=>`<button class="tab-btn${t.id===reportsActiveTab?' active':''}" data-reptab="${t.id}">${t.label}</button>`).join('')}
+    </div>
+    <div id="reports-content">
+      ${reportsActiveTab==='calendar' ? `<div class="card">${reportsCalendarHtml()}</div>` :
+        reportsActiveTab==='trades' ? `<div class="card">${reportTradeListHtml()}</div>` :
+        `<div class="card" style="margin-bottom:16px;">
+          ${groups.length>1?`<div style="height:220px;margin-bottom:14px;"><canvas id="reports-chart-canvas"></canvas></div>`:''}
+          ${reportPeriodTableHtml(groups, reportsActiveTab[0].toUpperCase()+reportsActiveTab.slice(1))}
+        </div>`
+      }
+    </div>
+  `;
+
+  container.querySelectorAll('[data-reptab]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ reportsActiveTab=btn.dataset.reptab; renderReports(container); });
+  });
+  document.getElementById('rep-export-csv').addEventListener('click', exportReportsCSV);
+  document.getElementById('rep-export-json').addEventListener('click', ()=>{
+    downloadJson({exportedAt:new Date().toISOString(),journal:state.journal,strategies:state.strategies,settings:state.settings},'algopilot-full-export-'+todayISO()+'.json');
+    showToast('JSON exported','success');
+  });
+  document.getElementById('rep-print').addEventListener('click', ()=>{
+    window.print();
+    showToast('Print dialog opened — choose "Save as PDF" to export','success');
+  });
+
+  if(!['calendar','trades'].includes(reportsActiveTab) && groups.length>1){
+    setTimeout(()=>drawReportsChart(groups), 30);
+  }
+  refreshIcons();
+}
+function reportTradeListHtml(){
+  const all=[...state.journal].sort((a,b)=>new Date(b.date||b.openedAt)-new Date(a.date||a.openedAt));
+  if(!all.length) return emptyState('book-open','No journal entries','Start logging trades in the journal.');
+  return `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Strategy</th><th>Status</th><th>P&L</th><th>Emotion</th><th>Rating</th></tr></thead><tbody>
+    ${all.slice(0,100).map(t=>`<tr>
+      <td>${formatDate(t.date||t.openedAt||'')}</td>
+      <td>${escapeHtml(t.strategyName||'—')}</td>
+      <td><span class="badge badge-${t.status==='closed'?'profit':t.status==='open'?'accent':'neutral'}">${escapeHtml(t.status||'—')}</span></td>
+      <td class="mono ${pnlClass(Number(t.pnl||0))}" style="font-weight:600;">${t.pnl!=null?formatMoney(Number(t.pnl)):'—'}</td>
+      <td>${escapeHtml(t.emotion||'—')}</td>
+      <td>${t.rating?'★'.repeat(t.rating)+'☆'.repeat(5-t.rating):'—'}</td>
+    </tr>`).join('')}
+  </tbody></table></div>`;
+}
+VIEW_RENDERERS.reports = renderReports;
+
+/* ============================================================
+   PART 20 — ECONOMIC CALENDAR
+   Manual entry of macro events that move volatility.
+   ============================================================ */
+let econFilters = {search:'', impact:'', upcoming:false};
+let econFormState = null;
+
+const IMPACT_COLORS = {high:'loss', medium:'warn', low:'profit'};
+const COMMON_EVENTS = ['RBI MPC Decision','US Fed Rate Decision','US CPI','US Nonfarm Payrolls','India CPI','India IIP','India GDP','US GDP','US PCE','US PPI','Earnings (Nifty 50)','Options Expiry (Monthly)','Options Expiry (Weekly)','US FOMC Minutes','RBI Policy Statement','US Jobs Report'];
+
+function filteredEconEvents(){
+  const q = econFilters.search.trim().toLowerCase();
+  const now = new Date();
+  return state.economicEvents.filter(ev=>{
+    if(econFilters.impact && ev.impact!==econFilters.impact) return false;
+    if(econFilters.upcoming && new Date(ev.date) < now) return false;
+    if(!q) return true;
+    return (ev.title||'').toLowerCase().includes(q)||(ev.country||'').toLowerCase().includes(q)||(ev.notes||'').toLowerCase().includes(q);
+  }).sort((a,b)=>new Date(a.date)-new Date(b.date));
+}
+
+function econEventRowHtml(ev){
+  const isPast = new Date(ev.date) < new Date();
+  const impactCls = IMPACT_COLORS[ev.impact]||'neutral';
+  return `<div class="list-row" style="opacity:${isPast?0.65:1};">
+    <div style="flex:1;min-width:0;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+        <span class="badge badge-${impactCls}" style="text-transform:uppercase;font-size:9.5px;">${escapeHtml(ev.impact||'—')}</span>
+        <strong style="font-size:13.5px;">${escapeHtml(ev.title)}</strong>
+        ${ev.country?`<span class="sub" style="font-size:11px;">${escapeHtml(ev.country)}</span>`:''}
+        ${isPast?'<span class="badge badge-neutral" style="font-size:9px;">Past</span>':'<span class="badge badge-accent" style="font-size:9px;">Upcoming</span>'}
+      </div>
+      <div class="sub" style="font-size:11.5px;">
+        ${formatDate(ev.date,{weekday:'short',day:'numeric',month:'short',year:'numeric'})}${ev.time?' at '+escapeHtml(ev.time):''}
+        ${ev.forecast!=null?` · Forecast: <strong>${escapeHtml(String(ev.forecast))}</strong>`:''}
+        ${ev.previous!=null?` · Previous: ${escapeHtml(String(ev.previous))}`:''}
+        ${ev.actual!=null?` · Actual: <strong class="${pnlClass(Number(ev.actual||0))}">${escapeHtml(String(ev.actual))}</strong>`:''}
+      </div>
+      ${ev.notes?`<p class="sub" style="font-size:12px;margin-top:4px;">${escapeHtml(ev.notes)}</p>`:''}
+    </div>
+    <div style="display:flex;gap:4px;flex-shrink:0;">
+      <button class="icon-btn" style="width:28px;height:28px;" data-action="econ-edit" data-id="${ev.id}">${lucideIcon('pencil')}</button>
+      <button class="icon-btn" style="width:28px;height:28px;" data-action="econ-delete" data-id="${ev.id}">${lucideIcon('trash-2')}</button>
+    </div>
+  </div>`;
+}
+
+function openEconForm(existing){
+  econFormState = existing ? {...existing} : {id:uid(), title:'', date:todayISO(), time:'', country:'India', impact:'high', forecast:null, previous:null, actual:null, notes:'', createdAt:new Date().toISOString()};
+  const bodyEl = document.createElement('div');
+  bodyEl.innerHTML = `
+    <div class="field"><label>Event</label>
+      <input type="text" id="ef-title" list="econ-suggestions" value="${escapeHtml(econFormState.title)}" placeholder="e.g. RBI MPC Decision">
+      <datalist id="econ-suggestions">${COMMON_EVENTS.map(e=>`<option value="${escapeHtml(e)}">`).join('')}</datalist>
+    </div>
+    <div class="row-3">
+      <div class="field"><label>Date</label><input type="date" id="ef-date" value="${econFormState.date}"></div>
+      <div class="field"><label>Time (optional)</label><input type="time" id="ef-time" value="${econFormState.time||''}"></div>
+      <div class="field"><label>Country</label><input type="text" id="ef-country" value="${escapeHtml(econFormState.country||'India')}"></div>
+    </div>
+    <div class="row-3">
+      <div class="field"><label>Impact</label><select id="ef-impact">
+        <option value="high" ${econFormState.impact==='high'?'selected':''}>🔴 High</option>
+        <option value="medium" ${econFormState.impact==='medium'?'selected':''}>🟡 Medium</option>
+        <option value="low" ${econFormState.impact==='low'?'selected':''}>🟢 Low</option>
+      </select></div>
+      <div class="field"><label>Forecast</label><input type="text" id="ef-forecast" value="${econFormState.forecast!=null?econFormState.forecast:''}"></div>
+      <div class="field"><label>Previous</label><input type="text" id="ef-previous" value="${econFormState.previous!=null?econFormState.previous:''}"></div>
+    </div>
+    <div class="field"><label>Actual (fill after release)</label><input type="text" id="ef-actual" value="${econFormState.actual!=null?econFormState.actual:''}"></div>
+    <div class="field"><label>Notes</label><textarea id="ef-notes" rows="2">${escapeHtml(econFormState.notes||'')}</textarea></div>
+  `;
+  const footerEl = document.createElement('div');
+  footerEl.style.cssText='display:flex;gap:10px;width:100%;';
+  footerEl.innerHTML=`<button class="btn btn-ghost btn-block" id="ef-cancel">Cancel</button><button class="btn btn-primary btn-block" id="ef-save">${lucideIcon('check')} Save</button>`;
+  openSheet({title:existing?'Edit Event':'New Event', bodyEl, footerEl});
+  document.getElementById('ef-cancel').addEventListener('click', closeSheet);
+  document.getElementById('ef-save').addEventListener('click', saveEconEvent);
+  refreshIcons();
+}
+async function saveEconEvent(){
+  const title = document.getElementById('ef-title').value.trim();
+  if(!title){showToast('Enter an event name','error');return;}
+  const toNum = id=>{ const v=document.getElementById(id).value.trim(); return v!==''?v:null; };
+  const ev = {...econFormState, title, date:document.getElementById('ef-date').value||todayISO(),
+    time:document.getElementById('ef-time').value||'', country:document.getElementById('ef-country').value.trim(),
+    impact:document.getElementById('ef-impact').value, forecast:toNum('ef-forecast'), previous:toNum('ef-previous'),
+    actual:toNum('ef-actual'), notes:document.getElementById('ef-notes').value.trim()};
+  await dbPut('economicEvents', ev);
+  const i=state.economicEvents.findIndex(e=>e.id===ev.id);
+  if(i>-1) state.economicEvents[i]=ev; else state.economicEvents.push(ev);
+  closeSheet(); navigateTo('economicCalendar'); showToast('Event saved','success');
+}
+function renderEconomicCalendar(container){
+  const events = filteredEconEvents();
+  const upcoming = state.economicEvents.filter(ev=>new Date(ev.date)>=new Date()).length;
+  container.innerHTML = `
+    <div class="view-head-row">
+      <div><h1>Economic Calendar</h1><p class="sub">${state.economicEvents.length} events · ${upcoming} upcoming</p></div>
+      <button class="btn btn-primary" id="econ-new-btn">${lucideIcon('plus')} New Event</button>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="row-3">
+        <div class="field" style="margin:0;"><input type="text" id="econ-search" placeholder="Search events…" value="${escapeHtml(econFilters.search)}"></div>
+        <div class="field" style="margin:0;"><select id="econ-impact-filter">
+          <option value="">All impacts</option>
+          <option value="high" ${econFilters.impact==='high'?'selected':''}>🔴 High</option>
+          <option value="medium" ${econFilters.impact==='medium'?'selected':''}>🟡 Medium</option>
+          <option value="low" ${econFilters.impact==='low'?'selected':''}>🟢 Low</option>
+        </select></div>
+        <div class="field" style="margin:0;display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="econ-upcoming-only" ${econFilters.upcoming?'checked':''} style="width:16px;height:16px;">
+          <label for="econ-upcoming-only" style="font-size:13px;cursor:pointer;margin:0;">Upcoming only</label>
+        </div>
+      </div>
+    </div>
+    <div id="econ-list">
+      ${events.length===0
+        ? emptyState('calendar', state.economicEvents.length===0?'No events yet':'No matching events',
+            state.economicEvents.length===0?'Add key macro events — RBI MPC, US CPI, options expiry dates — to keep track of vol-moving catalysts.':'Try different filters.')
+        : events.map(econEventRowHtml).join('')}
+    </div>
+  `;
+  document.getElementById('econ-new-btn').addEventListener('click',()=>openEconForm(null));
+  document.getElementById('econ-search').addEventListener('input',(e)=>{econFilters.search=e.target.value;renderEconomicCalendar(container);});
+  document.getElementById('econ-impact-filter').addEventListener('change',(e)=>{econFilters.impact=e.target.value;renderEconomicCalendar(container);});
+  document.getElementById('econ-upcoming-only').addEventListener('change',(e)=>{econFilters.upcoming=e.target.checked;renderEconomicCalendar(container);});
+  document.getElementById('econ-list').addEventListener('click',(e)=>{
+    const btn=e.target.closest('[data-action]'); if(!btn) return;
+    const ev=state.economicEvents.find(x=>x.id===btn.dataset.id); if(!ev) return;
+    if(btn.dataset.action==='econ-edit') openEconForm(ev);
+    if(btn.dataset.action==='econ-delete') showConfirm({title:'Delete event?',message:'Remove this economic event permanently.',okLabel:'Delete',onConfirm:async()=>{
+      await dbDelete('economicEvents',ev.id); state.economicEvents=state.economicEvents.filter(x=>x.id!==ev.id); navigateTo('economicCalendar'); showToast('Event deleted','success');
+    }});
+  });
+  refreshIcons();
+}
+VIEW_RENDERERS.economicCalendar = renderEconomicCalendar;
+
+/* ============================================================
+   PART 21 — MARKET BREADTH
+   ============================================================ */
+let mbChartInst = null;
+let mbSelectedChart = 'ad';
+
+function mbObs(){ return [...state.marketBreadthData].sort((a,b)=>new Date(a.date)-new Date(b.date)); }
+function mbRegime(obs){
+  if(obs.length<2) return {label:'Insufficient Data',cls:'neutral'};
+  const recent = obs.slice(-5);
+  const avgAD = recent.reduce((s,o)=>s+(Number(o.advances||0)-Number(o.declines||0)),0)/recent.length;
+  const latestVix = Number(obs[obs.length-1].vix||0);
+  if(avgAD>200&&latestVix<14) return {label:'Strong Bullish',cls:'profit'};
+  if(avgAD>0&&latestVix<18) return {label:'Moderately Bullish',cls:'profit'};
+  if(avgAD<-200||latestVix>24) return {label:'Bearish',cls:'loss'};
+  if(latestVix>20) return {label:'Elevated Risk',cls:'warn'};
+  return {label:'Neutral',cls:'neutral'};
+}
+function drawMbChart(){
+  const canvas = document.getElementById('mb-chart-canvas');
+  if(!canvas||typeof Chart==='undefined') return;
+  if(mbChartInst){mbChartInst.destroy();mbChartInst=null;}
+  const obs = mbObs();
+  if(obs.length<2) return;
+  let labels = obs.map(o=>formatDate(o.date,{day:'numeric',month:'short'}));
+  let data, color, label;
+  if(mbSelectedChart==='ad'){ data=obs.map(o=>Number(o.advances||0)-Number(o.declines||0)); color='#5b8def'; label='A/D Difference'; }
+  else if(mbSelectedChart==='vix'){ data=obs.map(o=>Number(o.vix||0)); color='#f87171'; label='VIX'; }
+  else if(mbSelectedChart==='pcr'){ data=obs.map(o=>Number(o.pcr||0)); color='#22d3ee'; label='Put/Call Ratio'; }
+  else { data=obs.map(o=>Number(o.newHighs||0)-Number(o.newLows||0)); color='#34d399'; label='New Highs − Lows'; }
+  mbChartInst = new Chart(canvas.getContext('2d'),{
+    type:'line', data:{labels, datasets:[{data, borderColor:color, borderWidth:2, pointRadius:2, fill:false, tension:0.3}]},
+    options:{responsive:true,maintainAspectRatio:false, plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>label+': '+formatNum(ctx.parsed.y,2)}}},
+      scales:{x:{ticks:{color:'#5a6275',maxTicksLimit:8,font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9}},grid:{color:'rgba(255,255,255,0.06)'}}}}
+  });
+}
+async function saveMbObservation(container){
+  const date = document.getElementById('mb-date').value||todayISO();
+  const obs = {id:uid(), date, advances:Number(document.getElementById('mb-advances').value)||null, declines:Number(document.getElementById('mb-declines').value)||null,
+    newHighs:Number(document.getElementById('mb-newhighs').value)||null, newLows:Number(document.getElementById('mb-newlows').value)||null,
+    vix:Number(document.getElementById('mb-vix').value)||null, pcr:Number(document.getElementById('mb-pcr').value)||null,
+    notes:document.getElementById('mb-notes').value.trim()};
+  if(!obs.advances&&!obs.vix&&!obs.pcr){showToast('Enter at least one data point','error');return;}
+  await dbPut('marketBreadthData',obs);
+  const i=state.marketBreadthData.findIndex(o=>o.date===date);
+  if(i>-1) state.marketBreadthData[i]=obs; else state.marketBreadthData.push(obs);
+  navigateTo('marketBreadth'); showToast('Observation saved','success');
+}
+function renderMarketBreadth(container){
+  const obs = mbObs();
+  const regime = mbRegime(obs);
+  const latest = obs.length?obs[obs.length-1]:null;
+  container.innerHTML = `
+    <div class="view-head"><h1>Market Breadth</h1><p class="sub">Advance/decline, VIX, PCR and new high/low data you log over time</p></div>
+    <div class="kpi-grid" style="margin-bottom:16px;">
+      ${kpiCard('Regime', regime.label, '', 'activity', undefined, regime.cls)}
+      ${kpiCard('Latest A/D', latest&&latest.advances!=null?((Number(latest.advances)-Number(latest.declines||0))>=0?'+':'')+String(Number(latest.advances)-Number(latest.declines||0)):'—', latest&&(Number(latest.advances||0)-Number(latest.declines||0))>=0?'profit':'loss', 'trending-up')}
+      ${kpiCard('Latest VIX', latest&&latest.vix!=null?formatNum(latest.vix,1):'—', latest&&Number(latest.vix||0)>20?'loss':latest&&Number(latest.vix||0)<14?'profit':'', 'waves')}
+      ${kpiCard('Latest PCR', latest&&latest.pcr!=null?formatNum(latest.pcr,2):'—', latest&&Number(latest.pcr||0)>1?'profit':'', 'scale')}
+      ${kpiCard('New H−L', latest&&latest.newHighs!=null?String(Number(latest.newHighs||0)-Number(latest.newLows||0)):'—', '', 'flag')}
+      ${kpiCard('Observations', String(obs.length), '', 'database')}
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Log Daily Observation</span>${lucideIcon('plus-circle')}</div>
+      <div class="row-3">
+        <div class="field"><label>Date</label><input type="date" id="mb-date" value="${todayISO()}"></div>
+        <div class="field"><label>Advances</label><input type="number" id="mb-advances" placeholder="e.g. 1050"></div>
+        <div class="field"><label>Declines</label><input type="number" id="mb-declines" placeholder="e.g. 430"></div>
+      </div>
+      <div class="row-3">
+        <div class="field"><label>New Highs</label><input type="number" id="mb-newhighs" placeholder="e.g. 120"></div>
+        <div class="field"><label>New Lows</label><input type="number" id="mb-newlows" placeholder="e.g. 18"></div>
+        <div class="field"><label>VIX</label><input type="number" step="0.1" id="mb-vix" placeholder="e.g. 13.5"></div>
+      </div>
+      <div class="row-2">
+        <div class="field"><label>Put/Call Ratio (PCR)</label><input type="number" step="0.01" id="mb-pcr" placeholder="e.g. 0.87"></div>
+        <div class="field"><label>Notes</label><input type="text" id="mb-notes" placeholder="optional"></div>
+      </div>
+      <button class="btn btn-primary btn-block" id="mb-save-btn">${lucideIcon('check')} Save Observation</button>
+    </div>
+    ${obs.length>=2?`
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Breadth Chart</span></div>
+      <div class="tabs" style="margin-bottom:10px;">
+        <button class="tab-btn${mbSelectedChart==='ad'?' active':''}" data-mbchart="ad">A/D</button>
+        <button class="tab-btn${mbSelectedChart==='vix'?' active':''}" data-mbchart="vix">VIX</button>
+        <button class="tab-btn${mbSelectedChart==='pcr'?' active':''}" data-mbchart="pcr">PCR</button>
+        <button class="tab-btn${mbSelectedChart==='hl'?' active':''}" data-mbchart="hl">H−L</button>
+      </div>
+      <div style="height:200px;"><canvas id="mb-chart-canvas"></canvas></div>
+    </div>`:''}
+    <div class="card">
+      <div class="card-title"><span>History (${obs.length} observations)</span></div>
+      ${obs.length===0?emptyState('activity','No observations yet','Log today\'s breadth data above to start tracking market health.'):
+      `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Advances</th><th>Declines</th><th>A/D</th><th>VIX</th><th>PCR</th><th>H/L</th><th></th></tr></thead><tbody>
+        ${[...obs].reverse().slice(0,50).map(o=>{
+          const ad=(Number(o.advances||0)-Number(o.declines||0));
+          return `<tr>
+            <td>${formatDate(o.date)}</td>
+            <td class="mono profit">${o.advances!=null?o.advances:'—'}</td>
+            <td class="mono loss">${o.declines!=null?o.declines:'—'}</td>
+            <td class="mono ${ad>=0?'profit':'loss'}" style="font-weight:600;">${o.advances!=null?(ad>=0?'+':'')+ad:'—'}</td>
+            <td class="mono">${o.vix!=null?formatNum(o.vix,1):'—'}</td>
+            <td class="mono">${o.pcr!=null?formatNum(o.pcr,2):'—'}</td>
+            <td class="mono">${o.newHighs!=null?((Number(o.newHighs||0)-Number(o.newLows||0))>=0?'+':'')+String(Number(o.newHighs||0)-Number(o.newLows||0)):'—'}</td>
+            <td><button class="icon-btn" style="width:24px;height:24px;" data-action="mb-delete" data-id="${o.id}">${lucideIcon('trash-2')}</button></td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>`}
+    </div>
+  `;
+  document.getElementById('mb-save-btn').addEventListener('click',()=>saveMbObservation(container));
+  if(obs.length>=2){
+    container.querySelectorAll('[data-mbchart]').forEach(btn=>btn.addEventListener('click',()=>{mbSelectedChart=btn.dataset.mbchart;container.querySelectorAll('[data-mbchart]').forEach(b=>b.classList.toggle('active',b===btn));drawMbChart();}));
+    setTimeout(drawMbChart,30);
+  }
+  container.querySelector('#mb-chart-canvas')?.parentElement?.parentElement && null;
+  container.querySelectorAll('[data-action="mb-delete"]').forEach(btn=>btn.addEventListener('click',async()=>{
+    await dbDelete('marketBreadthData',btn.dataset.id);
+    state.marketBreadthData=state.marketBreadthData.filter(o=>o.id!==btn.dataset.id);
+    navigateTo('marketBreadth');
+  }));
+  refreshIcons();
+}
+VIEW_RENDERERS.marketBreadth = renderMarketBreadth;
+
+/* ============================================================
+   PART 22 — POSITION ANALYZER
+   Portfolio-level Greeks, exposure, and stress testing from
+   all currently open paper positions.
+   ============================================================ */
+function computePortfolioGreeks(){
+  const open = state.paperPositions.filter(p=>p.status==='open');
+  let netDelta=0, netGamma=0, netTheta=0, netVega=0, netRho=0;
+  let totalExposure=0, totalMargin=0, worstCase=0;
+  const positionDetails = [];
+
+  open.forEach(p=>{
+    const quote = MarketDataService.getQuote(p.symbol);
+    const spot = quote?quote.ltp:p.avgPrice;
+    const livePrice = currentPaperPrice(p);
+    const lotVal = p.qty * p.lotSize;
+    const exposure = (p.strike||p.avgPrice||0) * lotVal;
+    const margin = computePaperPositionMargin(p);
+    totalExposure += exposure;
+    totalMargin += margin;
+
+    let greeks = {delta:0,gamma:0,theta:0,vega:0,rho:0};
+    if(p.instrumentType==='option'&&p.strike&&p.daysToExpiryAtOpen){
+      const dte = Math.max(0.5, p.daysToExpiryAtOpen - Math.max(0,(Date.now()-new Date(p.openedAt).getTime())/(86400000)));
+      const g = blackScholes(spot, p.strike, dte, state.settings.riskFreeRatePct, state.settings.defaultIV, p.optionType);
+      const sign = p.side==='long'?1:-1;
+      greeks = {delta:g.delta*sign*lotVal, gamma:g.gamma*sign*lotVal, theta:g.theta*sign*lotVal, vega:g.vega*sign*lotVal, rho:g.rho*sign*lotVal};
+    } else if(p.instrumentType==='future'){
+      const sign = p.side==='long'?1:-1;
+      greeks.delta = sign*lotVal;
+    }
+    netDelta+=greeks.delta; netGamma+=greeks.gamma; netTheta+=greeks.theta; netVega+=greeks.vega; netRho+=greeks.rho;
+
+    // Worst-case: full premium loss for long options, 20% move against shorts
+    if(p.instrumentType==='option'){
+      worstCase += p.side==='long' ? p.avgPrice*lotVal : exposure*0.2;
+    } else {
+      worstCase += exposure*0.15;
+    }
+    const pnl = legPnlPerUnit(p,livePrice)*lotVal;
+    positionDetails.push({...p, livePrice, pnl, exposure, margin, greeks});
+  });
+
+  const totalCapital = Number(state.settings.paperCapital)||1000000;
+  const capitalDeployed = totalMargin;
+  const capitalPct = totalCapital>0?(capitalDeployed/totalCapital)*100:0;
+  const worstCasePct = totalCapital>0?(worstCase/totalCapital)*100:0;
+
+  // Risk score 0–100 (higher = riskier)
+  let riskScore = 0;
+  riskScore += Math.min(40, capitalPct * 0.8);   // capital deployed weight
+  riskScore += Math.min(30, worstCasePct * 0.6); // worst-case weight
+  riskScore += Math.min(20, Math.abs(netDelta)/Math.max(1,open.length)*5); // delta concentration
+  riskScore += Math.min(10, open.length * 2);    // position count
+
+  return {open, netDelta, netGamma, netTheta, netVega, netRho, totalExposure, totalMargin,
+    worstCase, capitalDeployed, capitalPct, worstCasePct, riskScore:clamp(riskScore,0,100), positionDetails, totalCapital};
+}
+
+function stressTestScenarios(positionDetails){
+  const moves = [-20,-15,-10,-5,0,5,10,15,20];
+  return moves.map(movePct=>{
+    let pnl=0;
+    positionDetails.forEach(p=>{
+      const spot0 = MarketDataService.getQuote(p.symbol)?.ltp || p.avgPrice;
+      const stressSpot = spot0*(1+movePct/100);
+      const lotVal = p.qty*p.lotSize;
+      if(p.instrumentType==='option'&&p.strike&&p.daysToExpiryAtOpen){
+        const dte=Math.max(0.5,p.daysToExpiryAtOpen-1);
+        const g=blackScholes(stressSpot,p.strike,dte,state.settings.riskFreeRatePct,state.settings.defaultIV,p.optionType);
+        pnl+=(p.side==='long'?(g.price-p.avgPrice):(p.avgPrice-g.price))*lotVal;
+      } else {
+        pnl+=(p.side==='long'?1:-1)*(stressSpot-spot0)*lotVal;
+      }
+    });
+    return {movePct, pnl};
+  });
+}
+
+let paStressChartInst=null;
+function drawStressChart(scenarios){
+  const canvas=document.getElementById('pa-stress-canvas');
+  if(!canvas||typeof Chart==='undefined') return;
+  if(paStressChartInst){paStressChartInst.destroy();paStressChartInst=null;}
+  paStressChartInst=new Chart(canvas.getContext('2d'),{
+    type:'bar', data:{labels:scenarios.map(s=>s.movePct>0?'+'+s.movePct+'%':s.movePct+'%'),
+      datasets:[{data:scenarios.map(s=>s.pnl), backgroundColor:scenarios.map(s=>s.pnl>=0?'rgba(52,211,153,0.7)':'rgba(248,113,113,0.7)'), borderColor:scenarios.map(s=>s.pnl>=0?'#34d399':'#f87171'), borderWidth:1, borderRadius:4}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:'#5a6275',font:{size:9}},grid:{display:false}},y:{ticks:{color:'#5a6275',font:{size:9},callback:v=>formatMoney(v)},grid:{color:'rgba(255,255,255,0.06)'}}}}
+  });
+}
+
+function renderPositionAnalyzer(container){
+  const pa = computePortfolioGreeks();
+  const riskColor = pa.riskScore>=70?'loss':pa.riskScore>=40?'warn':'profit';
+  const scenarios = pa.open.length?stressTestScenarios(pa.positionDetails):[];
+  container.innerHTML = `
+    <div class="view-head"><h1>Position Analyzer</h1><p class="sub">Portfolio-level Greeks, exposure and stress testing across all open paper positions</p></div>
+    ${pa.open.length===0?`<div class="card">${emptyState('layers','No open positions','Open some paper positions first — the analyzer will compute portfolio-level Greeks and risk metrics here.')}</div>`:
+    `<div class="kpi-grid" style="margin-bottom:16px;">
+      ${kpiCard('Risk Score', formatNum(pa.riskScore,0)+' / 100', riskColor, 'shield')}
+      ${kpiCard('Open Positions', String(pa.open.length), '', 'layers')}
+      ${kpiCard('Capital Deployed', formatMoney(pa.capitalDeployed), '', 'lock', formatPct(pa.capitalPct,1)+' of virtual capital')}
+      ${kpiCard('Total Exposure', formatMoney(pa.totalExposure), '', 'trending-up')}
+      ${kpiCard('Worst-Case Loss', formatMoney(pa.worstCase), 'loss', 'alert-triangle', formatPct(pa.worstCasePct,1)+' of capital')}
+      ${kpiCard('Net Delta', formatNum(pa.netDelta,2), pa.netDelta>0?'profit':pa.netDelta<0?'loss':'', 'activity')}
+      ${kpiCard('Net Gamma', formatNum(pa.netGamma,4), '', 'zap')}
+      ${kpiCard('Net Theta / day', formatMoney(pa.netTheta), pa.netTheta>0?'profit':'loss', 'trending-down')}
+      ${kpiCard('Net Vega', formatNum(pa.netVega,3), '', 'waves')}
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Stress Test — Underlying Move Scenarios</span>${lucideIcon('zap')}</div>
+      <p class="sub" style="font-size:11.5px;margin-bottom:10px;">Estimated portfolio P&L for spot moves of −20% to +20%. Approximation using Black-Scholes at 1 DTE decay.</p>
+      <div style="height:200px;"><canvas id="pa-stress-canvas"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Position Breakdown</span>${lucideIcon('table')}</div>
+      <div class="table-wrap"><table><thead><tr><th>Position</th><th>Side</th><th>Lots</th><th>Live MTM</th><th>Margin</th><th>Δ</th><th>Θ/day</th><th>V</th></tr></thead><tbody>
+        ${pa.positionDetails.map(p=>{
+          const label=p.instrumentType==='future'?p.symbol+' FUT':(p.symbol+' '+p.strike+' '+(p.optionType==='call'?'CE':'PE'));
+          return `<tr>
+            <td><strong style="font-size:12.5px;">${escapeHtml(label)}</strong></td>
+            <td><span class="badge badge-${p.side==='long'?'profit':'loss'}">${p.side.toUpperCase()}</span></td>
+            <td class="mono">${p.qty}</td>
+            <td class="mono ${pnlClass(p.pnl)}" style="font-weight:600;">${formatMoney(p.pnl)}</td>
+            <td class="mono">${formatMoney(p.margin)}</td>
+            <td class="mono">${formatNum(p.greeks.delta,3)}</td>
+            <td class="mono ${p.greeks.theta>0?'profit':'loss'}">${formatNum(p.greeks.theta,2)}</td>
+            <td class="mono">${formatNum(p.greeks.vega,3)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody></table></div>
+    </div>`}
+  `;
+  if(pa.open.length) setTimeout(()=>drawStressChart(scenarios),30);
+  refreshIcons();
+}
+VIEW_RENDERERS.positionAnalyzer = renderPositionAnalyzer;
+
+/* ============================================================
+   PART 23 — AUTOMATION READINESS (Month 6)
+   Simulation only — no real broker connections.
+   ============================================================ */
+const AR_LS_KEY = 'algopilot_ar_state';
+function loadArState(){ try{ return JSON.parse(localStorage.getItem(AR_LS_KEY)||'{}'); }catch(e){ return {}; } }
+function saveArState(s){ try{ localStorage.setItem(AR_LS_KEY,JSON.stringify(s)); }catch(e){} }
+
+function computeReadinessScore(){
+  const j = state.journal;
+  const closed = j.filter(t=>t.pnl!=null);
+  const strats = state.strategies;
+  const bts = state.backtests;
+  const pm = computePaperTradingMetrics();
+  const arState = loadArState();
+
+  const criteria = [
+    {id:'journal_quality', label:'Journal Quality', desc:'At least 20 closed trades logged with notes and ratings.',
+      met: closed.length>=20 && closed.filter(t=>t.notes&&t.rating).length>=10, value:closed.length, max:20, weight:20},
+    {id:'strategy_quality', label:'Strategy Quality', desc:'At least 3 strategies built with payoff charts.',
+      met: strats.length>=3, value:strats.length, max:3, weight:15},
+    {id:'backtesting_quality', label:'Backtesting Done', desc:'At least 1 backtest profile with 30+ trades.',
+      met: bts.some(b=>b.trades.length>=30), value:Math.max(0,...bts.map(b=>b.trades.length),0), max:30, weight:20},
+    {id:'risk_rules', label:'Risk Rules Set', desc:'Daily and weekly loss limits configured in Settings.',
+      met: state.settings.maxDailyLossPct>0&&state.settings.maxWeeklyLossPct>0, value:state.settings.maxDailyLossPct, max:5, weight:15},
+    {id:'paper_trading', label:'Paper Trading History', desc:'At least 50 paper orders across 10+ positions.',
+      met: state.paperOrders.length>=50&&state.paperPositions.length>=10, value:state.paperOrders.length, max:50, weight:20},
+    {id:'capital_discipline', label:'Capital Discipline', desc:'Max drawdown in paper trading below 15%.',
+      met: Math.abs(pm.maxDrawdownPct)<15 && pm.closedCount>=5, value:Math.abs(pm.maxDrawdownPct).toFixed(1), max:15, weight:10},
+  ];
+  const score = criteria.reduce((s,c)=>s+(c.met?c.weight:0),0);
+  return {criteria, score};
+}
+
+let arExecLog = [];
+function arSimulateWebhook(){
+  const ts = new Date().toISOString();
+  const sample = ['{"action":"BUY","symbol":"NIFTY","strike":23200,"type":"CE","qty":1,"product":"MIS"}',
+    '{"action":"SELL","symbol":"BANKNIFTY","strike":57500,"type":"PE","qty":1,"product":"MIS"}',
+    '{"action":"EXIT","positionId":"abc123","exitType":"full"}'];
+  const payload = sample[Math.floor(Math.random()*sample.length)];
+  arExecLog.unshift({ts, type:'webhook', payload, status:'simulated ✓'});
+  arExecLog = arExecLog.slice(0,20);
+  renderArLog();
+  showToast('Webhook simulated','success');
+}
+function arSimulateTelegram(){
+  const ts = new Date().toISOString();
+  const msgs = ['📊 Position opened: NIFTY 23200 CE — 1 lot @ ₹244','🔴 SL hit: BANKNIFTY 57500 PE — Exit @ ₹180 (P&L: −₹1,980)','✅ Daily P&L: +₹3,240 | Win rate today: 67%'];
+  const payload = msgs[Math.floor(Math.random()*msgs.length)];
+  arExecLog.unshift({ts, type:'telegram', payload, status:'sent (simulation) ✓'});
+  arExecLog = arExecLog.slice(0,20);
+  renderArLog();
+  showToast('Telegram message simulated','success');
+}
+function renderArLog(){
+  const wrap = document.getElementById('ar-exec-log');
+  if(!wrap) return;
+  if(!arExecLog.length){ wrap.innerHTML = emptyState('terminal','No execution log yet','Use the simulators above to generate sample webhook and Telegram payloads.'); return; }
+  wrap.innerHTML = arExecLog.map(e=>`<div class="list-row" style="gap:10px;flex-wrap:wrap;">
+    <span class="badge badge-${e.type==='telegram'?'accent':'neutral'}" style="font-size:9.5px;">${e.type}</span>
+    <code style="font-size:11px;flex:1;word-break:break-all;background:rgba(0,0,0,0.25);padding:4px 8px;border-radius:6px;">${escapeHtml(e.payload)}</code>
+    <span class="sub" style="font-size:10.5px;flex-shrink:0;">${escapeHtml(e.status)}</span>
+    <span class="sub" style="font-size:10px;flex-shrink:0;">${formatDate(e.ts,{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+  </div>`).join('');
+}
+
+function criterionHtml(c){
+  const colorStyle = c.met ? 'color:var(--profit);' : 'color:var(--text-tertiary);';
+  const metColor = c.met ? 'profit' : 'text-tertiary';
+  return '<div class="settings-row" style="align-items:flex-start;gap:12px;">' +
+    '<div style="font-size:20px;flex-shrink:0;margin-top:2px;">' + (c.met?'✅':'⬜') + '</div>' +
+    '<div style="flex:1;">' +
+      '<div style="font-weight:600;font-size:13.5px;">' + escapeHtml(c.label) + ' <span style="font-size:11px;color:var(--text-tertiary);">(' + c.weight + ' pts)</span></div>' +
+      '<div class="sub" style="font-size:11.5px;">' + escapeHtml(c.desc) + '</div>' +
+      '<div style="font-size:11px;margin-top:3px;' + colorStyle + '">Current: ' + escapeHtml(String(c.value)) + ' / ' + escapeHtml(String(c.max)) + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+function renderAutomationReadiness(container){
+  const {criteria, score} = computeReadinessScore();
+  const scoreColor = score>=80?'profit':score>=50?'warn':'loss';
+  const BROKERS=[
+    {name:'Zerodha Kite Connect',notes:'API key (₹2000/mo). REST + WebSocket. Strong ecosystem.', docsUrl:'https://kite.trade/docs/'},
+    {name:'Shoonya (Finvasia)',notes:'Free API. TOTP-based login. WebSocket for live data.', docsUrl:'https://api.shoonya.com/'},
+    {name:'Upstox',notes:'OAuth 2.0. Free for personal use. REST + WebSocket.', docsUrl:'https://upstox.com/developer/api-documentation/'},
+    {name:'Angel One Smart API',notes:'Free. TOTP auth. WebSocket for live ticks.', docsUrl:'https://smartapi.angelbroking.com/'},
+    {name:'Fyers API',notes:'OAuth 2.0. WebSocket for real-time. Data + order API.', docsUrl:'https://myapi.fyers.in/docs/'},
+  ];
+  container.innerHTML = `
+    <div class="view-head"><h1>Automation Readiness</h1><p class="sub">Simulation only — no real broker connections. Assess your readiness to integrate live APIs.</p></div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Readiness Score</span>${lucideIcon('rocket')}</div>
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;">
+        <div style="font-size:52px;font-weight:800;font-family:'Space Grotesk',sans-serif;color:var(--${scoreColor==='profit'?'profit':scoreColor==='warn'?'warn':'loss'});">${score}<span style="font-size:22px;color:var(--text-tertiary);">/100</span></div>
+        <div>
+          <div style="font-size:15px;font-weight:600;">${score>=80?'🚀 Ready to go live':score>=50?'⚠ Getting there':'🔧 More groundwork needed'}</div>
+          <div class="sub" style="font-size:12px;margin-top:4px;">${score>=80?'Your journal, strategies and paper trading meet the quality bar for live API integration.':score>=50?'Good progress. Complete the remaining criteria before connecting real broker APIs.':'Focus on building a solid journal, backtest and paper trading history first.'}</div>
+        </div>
+      </div>
+      <div style="height:8px;background:rgba(255,255,255,0.08);border-radius:4px;overflow:hidden;"><div style="height:100%;width:${score}%;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:4px;transition:width 0.5s;"></div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Readiness Checklist</span>${lucideIcon('check-square')}</div>
+      ${criteria.map(criterionHtml).join('')}
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Broker API Preparation</span>${lucideIcon('link')}</div>
+      <p class="sub" style="margin-bottom:12px;">These are the recommended Indian brokers for algorithmic trading. All require you to register a developer account directly on their portal — no setup can be done here.</p>
+      ${BROKERS.map(b=>`<div class="settings-row" style="align-items:flex-start;">
+        <div style="flex:1;"><div style="font-weight:600;font-size:13px;">${escapeHtml(b.name)}</div><div class="sub" style="font-size:11.5px;">${escapeHtml(b.notes)}</div></div>
+        <span class="badge badge-neutral">🔧 Needs your account</span>
+      </div>`).join('')}
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-title"><span>Webhook Simulator</span>${lucideIcon('zap')}</div>
+      <p class="sub" style="margin-bottom:10px;">Simulate the JSON payloads your automation will send to a broker webhook. No real orders are placed.</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" id="ar-sim-webhook">${lucideIcon('send')} Simulate Webhook</button>
+        <button class="btn btn-ghost btn-sm" id="ar-sim-telegram">${lucideIcon('message-circle')} Simulate Telegram Alert</button>
+        <button class="btn btn-ghost btn-sm" id="ar-clear-log">${lucideIcon('trash-2')} Clear Log</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span>Execution Log</span>${lucideIcon('terminal')}</div>
+      <div id="ar-exec-log"></div>
+    </div>
+  `;
+  document.getElementById('ar-sim-webhook').addEventListener('click',arSimulateWebhook);
+  document.getElementById('ar-sim-telegram').addEventListener('click',arSimulateTelegram);
+  document.getElementById('ar-clear-log').addEventListener('click',()=>{ arExecLog=[]; renderArLog(); });
+  renderArLog();
+  refreshIcons();
+}
+VIEW_RENDERERS.automationReadiness = renderAutomationReadiness;
+
+/* ============================================================
+   ERROR CENTER
+   ============================================================ */
+function openErrorCenter(){
+  const bodyEl = document.createElement('div');
+  if(!state.errorLogs.length){
+    bodyEl.innerHTML = emptyState('check-circle','No errors logged','The global error handler has not caught any errors since the app loaded.');
+  } else {
+    bodyEl.innerHTML = `
+      <p class="sub" style="margin-bottom:10px;">${state.errorLogs.length} error${state.errorLogs.length>1?'s':''} logged since last page load.</p>
+      ${state.errorLogs.map((e,i)=>`
+        <div class="card" style="margin-bottom:10px;border-color:rgba(248,113,113,0.3);">
+          <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span class="badge badge-loss" style="font-size:9.5px;">${escapeHtml(e.module||'unknown')}</span>
+            <span class="sub" style="font-size:10.5px;">${formatDate(e.ts,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+          </div>
+          <div style="font-size:12.5px;font-weight:600;margin-bottom:4px;">${escapeHtml(e.message||'Unknown error')}</div>
+          ${e.stack?`<pre style="font-size:9.5px;color:var(--text-tertiary);overflow-x:auto;background:rgba(0,0,0,0.3);padding:8px;border-radius:6px;white-space:pre-wrap;">${escapeHtml(e.stack.slice(0,500))}</pre>`:''}
+        </div>`).join('')}
+    `;
+  }
+  const footerEl = document.createElement('div');
+  footerEl.style.cssText='display:flex;gap:10px;width:100%;';
+  footerEl.innerHTML = `
+    <button class="btn btn-ghost btn-block" id="ec-export">${lucideIcon('download')} Export JSON</button>
+    <button class="btn btn-ghost btn-block" id="ec-clear">${lucideIcon('trash-2')} Clear Log</button>
+    <button class="btn btn-primary btn-block" id="ec-close">Close</button>
+  `;
+  openSheet({title:'Error Center ('+state.errorLogs.length+')', bodyEl, footerEl});
+  document.getElementById('ec-close').addEventListener('click', closeSheet);
+  document.getElementById('ec-clear').addEventListener('click', ()=>{ state.errorLogs=[]; closeSheet(); navigateTo('settings'); showToast('Error log cleared','success'); });
+  document.getElementById('ec-export').addEventListener('click', ()=>{ downloadJson({exportedAt:new Date().toISOString(), errorLogs:state.errorLogs},'algopilot-errors-'+todayISO()+'.json'); });
+  refreshIcons();
+}
+
+/* ============================================================
+   IMPROVED BACKUP VALIDATION
+   ============================================================ */
+function validateImportPayload(data){
+  const errors = [];
+  if(!data||typeof data!=='object') return {valid:false, errors:['Not a valid JSON object']};
+  if(data.version && typeof data.version!=='number' && typeof data.version!=='string') errors.push('Invalid version field');
+  const arrayFields = ['strategies','journal','watchlist','checklist','paperPositions','paperOrders','bsCalculations','optionChainSnapshots','volatilityObservations','backtests','economicEvents','marketBreadthData'];
+  arrayFields.forEach(f=>{ if(data[f]!==undefined && !Array.isArray(data[f])) errors.push(f+' must be an array'); });
+  if(data.settings && typeof data.settings!=='object') errors.push('settings must be an object');
+  const totalRecords = arrayFields.reduce((s,f)=>s+(Array.isArray(data[f])?data[f].length:0),0);
+  if(totalRecords===0 && !data.settings) errors.push('No data found in this export — file may be empty or corrupt');
+  return {valid:errors.length===0, errors, totalRecords};
+}
 
 </script>
 </body>
